@@ -1,0 +1,5 @@
+# One-off tooling only: converts the TF1 frozen graph from
+# vendor/handtracking into ONNX so the runtime does not need TensorFlow.
+-r requirements.txt
+tensorflow==2.16.2
+tf2onnx==1.16.1

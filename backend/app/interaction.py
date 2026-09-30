@@ -1,0 +1,388 @@
+"""Product interaction state machine.
+
+Implements exactly the transitions described in ``refernces/surveil.docx``:
+
+    ON_SHELF -> LIFTING -> IN_HAND -> RETURNING -> ON_SHELF     (pickup + put back)
+    ON_SHELF -> LIFTING -> IN_HAND -> IN_BASKET                 (pickup + basket)
+    any      -> LOST                                            (track expires)
+
+    ON_SHELF  first detection saves the box as the shelf anchor; the anchor is
+              re-learned while the product is still for ~15 settling frames.
+    LIFTING   hand touching AND displaced >= 60px from the anchor.
+    IN_HAND   the LIFTING condition holds for 5 consecutive frames -> PICKED_UP.
+    RETURNING hand no longer touching AND no longer displaced.
+    ON_SHELF  the RETURNING condition holds for 5 consecutive frames -> PUT_BACK.
+    IN_BASKET >=50% of the box inside the basket zone for 4 frames -> PLACED_IN_BASKET.
+    LOST      the track has been missing for 30 frames.
+
+A TOUCH event is emitted for a hand contact that never displaces the product,
+so the ledger speaks the same language as the RetailAction dataset
+(TAKE / PUT / TOUCH).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any
+
+from .config import ThresholdSettings
+from .geometry import BBox, center_distance, expand, intersection_over_min, overlap_ratio
+from .hands import HandBox
+
+
+class ProductState(str, Enum):
+    ON_SHELF = "ON_SHELF"
+    LIFTING = "LIFTING"
+    IN_HAND = "IN_HAND"
+    RETURNING = "RETURNING"
+    IN_BASKET = "IN_BASKET"
+    LOST = "LOST"
+
+
+class EventType(str, Enum):
+    TOUCH = "TOUCH"
+    PICKED_UP = "PICKED_UP"
+    PUT_BACK = "PUT_BACK"
+    PLACED_IN_BASKET = "PLACED_IN_BASKET"
+    CHECKED_OUT = "CHECKED_OUT"
+    TRACK_LOST = "TRACK_LOST"
+    ALERT_RAISED = "ALERT_RAISED"
+
+
+@dataclass
+class InteractionEvent:
+    type: EventType
+    ts: float
+    product_id: str
+    product_name: str
+    track_id: int
+    confidence: float
+    bbox: BBox
+    state: ProductState
+    hand_id: int | None = None
+    session_id: str | None = None
+    dwell_ms: int = 0
+    meta: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ProductTrack:
+    track_id: int
+    product_id: str
+    product_name: str
+    state: ProductState = ProductState.ON_SHELF
+    box: BBox | None = None
+    anchor: BBox | None = None
+    anchor_confirmed: bool = False
+    settle_frames: int = 0
+    score: float = 0.0
+    first_seen: float = 0.0
+    last_seen: float = 0.0
+    state_since: float = 0.0
+
+    # counters
+    lift_frames: int = 0
+    return_frames: int = 0
+    basket_frames: int = 0
+    touch_frames: int = 0
+    missed_frames: int = 0
+    touch_emitted: bool = False
+
+    # context
+    displaced: bool = False
+    touched: bool = False
+    hand_id: int | None = None
+    session_id: str | None = None
+    displacement_px: float = 0.0
+    basket_overlap: float = 0.0
+    on_shelf_since: float = 0.0
+    picked_up_at: float | None = None
+
+    def set_state(self, state: ProductState, ts: float) -> None:
+        if state is self.state:
+            return
+        self.state = state
+        self.state_since = ts
+
+
+class InteractionEngine:
+    def __init__(self, thresholds: ThresholdSettings, session_id: str) -> None:
+        self.t = thresholds
+        self.session_id = session_id
+        self.tracks: dict[int, ProductTrack] = {}
+        self.finished: list[ProductTrack] = []
+
+    # ------------------------------------------------------------------ utils
+    def reset(self) -> None:
+        self.tracks.clear()
+        self.finished.clear()
+
+    def _touching(self, box: BBox, hands: list[tuple[int, HandBox]]) -> tuple[bool, int | None]:
+        """True when a hand overlaps (or sits within hand_touch_px of) the box."""
+        padded = expand(box, self.t.hand_touch_px)
+        best_hand: int | None = None
+        best_score = 0.0
+        for hand_id, hand in hands:
+            overlap = intersection_over_min(padded, hand.bbox)
+            gap_ok = center_distance(hand.bbox, box) <= self.t.hand_touch_px * 1.5
+            if overlap >= self.t.hand_touch_min_overlap or (gap_ok and overlap > 0.0):
+                if overlap + hand.score * 1e-3 > best_score:
+                    best_score = overlap + hand.score * 1e-3
+                    best_hand = hand_id
+        return best_hand is not None, best_hand
+
+    def _in_basket(self, box: BBox, basket_zone: BBox | None) -> float:
+        if basket_zone is None:
+            return 0.0
+        return overlap_ratio(box, basket_zone)
+
+    # ----------------------------------------------------------------- update
+    def update(
+        self,
+        frame: int,
+        ts: float,
+        products: list[tuple[int, str, str, BBox, float]],
+        hands: list[tuple[int, HandBox]],
+        basket_zone: BBox | None,
+    ) -> list[InteractionEvent]:
+        events: list[InteractionEvent] = []
+
+        seen: set[int] = set()
+        for track_id, product_id, product_name, box, score in products:
+            seen.add(track_id)
+            track = self.tracks.get(track_id)
+            if track is None:
+                track = ProductTrack(
+                    track_id=track_id,
+                    product_id=product_id,
+                    product_name=product_name,
+                    first_seen=ts,
+                    state_since=ts,
+                    on_shelf_since=ts,
+                )
+                track.anchor = box
+                self.tracks[track_id] = track
+
+            track.box = box
+            track.score = score
+            track.last_seen = ts
+            track.missed_frames = 0
+
+            # --- settle / learn the shelf anchor --------------------------
+            # The anchor is only learnt during the initial settling phase. Once
+            # confirmed it is FROZEN: re-learning it while the product is being
+            # lifted would make the displacement always read as 0 and the
+            # pickup would never be confirmed. A fresh anchor is written only
+            # on a confirmed PUT_BACK.
+            if not track.anchor_confirmed and track.anchor is not None:
+                drift = center_distance(box, track.anchor)
+                if drift <= self.t.settle_motion_px and not track.touched:
+                    track.settle_frames += 1
+                    if track.settle_frames >= self.t.settle_frames:
+                        track.anchor = box
+                        track.anchor_confirmed = True
+                else:
+                    track.settle_frames = 0
+                    track.anchor = box
+
+            # --- signals ---------------------------------------------------
+            track.touched, hand_id = self._touching(box, hands)
+            if hand_id is not None:
+                track.hand_id = hand_id
+                track.session_id = self.session_id
+            track.basket_overlap = self._in_basket(box, basket_zone)
+            track.displacement_px = (
+                center_distance(box, track.anchor) if track.anchor is not None else 0.0
+            )
+            track.displaced = track.displacement_px >= self.t.shelf_displacement_px
+
+            events.extend(self._transition(track, ts))
+
+        # --- expire tracks that the detector stopped reporting ------------
+        for track_id in list(self.tracks.keys()):
+            if track_id in seen:
+                continue
+            track = self.tracks[track_id]
+            track.missed_frames += 1
+            if track.missed_frames >= self.t.max_missed_frames:
+                events.extend(self._expire(track, ts))
+
+        return events
+
+    # ------------------------------------------------------------- transitions
+    def _transition(self, track: ProductTrack, ts: float) -> list[InteractionEvent]:
+        out: list[InteractionEvent] = []
+        t = self.t
+
+        if not track.anchor_confirmed:
+            # Anchor still settling - do not interpret motion as an interaction.
+            track.lift_frames = 0
+            track.return_frames = 0
+            track.basket_frames = 0
+            track.touch_frames = 0
+            if track.touched:
+                track.touch_frames += 1
+                if track.touch_frames >= t.touch_emit_frames and not track.touch_emitted:
+                    track.touch_emitted = True
+                    out.append(self._event(track, ts, EventType.TOUCH))
+            else:
+                track.touch_frames = 0
+                track.touch_emitted = False
+            return out
+
+        if track.state is ProductState.ON_SHELF:
+            track.basket_frames = 0
+            track.return_frames = 0
+            track.lift_frames = 0
+
+            if track.touched:
+                track.touch_frames += 1
+                if track.touch_frames >= t.touch_emit_frames and not track.touch_emitted:
+                    track.touch_emitted = True
+                    out.append(self._event(track, ts, EventType.TOUCH))
+            else:
+                track.touch_frames = 0
+                track.touch_emitted = False
+
+            if track.touched and track.displaced:
+                track.lift_frames = 1
+                track.set_state(ProductState.LIFTING, ts)
+            return out
+
+        if track.state is ProductState.LIFTING:
+            if track.touched and track.displaced:
+                track.lift_frames += 1
+                if track.lift_frames >= t.lift_confirm_frames:
+                    track.set_state(ProductState.IN_HAND, ts)
+                    track.picked_up_at = ts
+                    track.touch_emitted = False
+                    out.append(self._event(track, ts, EventType.PICKED_UP, state_from="LIFTING"))
+            else:
+                # false alarm - fall back to ON_SHELF
+                track.lift_frames = 0
+                track.set_state(ProductState.ON_SHELF, ts)
+                track.on_shelf_since = ts
+            return out
+
+        if track.state is ProductState.IN_HAND:
+            track.lift_frames = 0
+            if track.basket_overlap >= t.basket_overlap_ratio:
+                track.basket_frames += 1
+                if track.basket_frames >= t.basket_confirm_frames:
+                    track.set_state(ProductState.IN_BASKET, ts)
+                    out.append(
+                        self._event(track, ts, EventType.PLACED_IN_BASKET, state_from="IN_HAND")
+                    )
+            else:
+                track.basket_frames = 0
+                if not track.touched and not track.displaced:
+                    track.return_frames = 0
+                    track.set_state(ProductState.RETURNING, ts)
+            return out
+
+        if track.state is ProductState.RETURNING:
+            if not track.touched and not track.displaced:
+                track.return_frames += 1
+                if track.return_frames >= t.return_confirm_frames:
+                    track.set_state(ProductState.ON_SHELF, ts)
+                    track.on_shelf_since = ts
+                    track.anchor = track.box
+                    track.anchor_confirmed = True
+                    track.settle_frames = t.settle_frames
+                    track.touch_emitted = False
+                    track.basket_frames = 0
+                    track.picked_up_at = None
+                    out.append(self._event(track, ts, EventType.PUT_BACK, state_from="RETURNING"))
+            else:
+                track.return_frames = 0
+                track.set_state(ProductState.IN_HAND, ts)
+            return out
+
+        if track.state is ProductState.IN_BASKET:
+            # Only the owner (dashboard) moves a product out of IN_BASKET via
+            # CHECKED_OUT. If it physically leaves the basket, we follow it back
+            # into the hand rather than silently dropping the track.
+            if track.basket_overlap < t.basket_overlap_ratio:
+                track.set_state(ProductState.IN_HAND, ts)
+                track.basket_frames = 0
+            return out
+
+        return out
+
+    def _expire(self, track: ProductTrack, ts: float) -> list[InteractionEvent]:
+        out: list[InteractionEvent] = []
+        track.set_state(ProductState.LOST, ts)
+        if self.t.lost_emit_event and self.t.mark_lost_state:
+            out.append(self._event(track, ts, EventType.TRACK_LOST, missed=track.missed_frames))
+        self.tracks.pop(track.track_id, None)
+        self.finished.append(track)
+        return out
+
+    # ------------------------------------------------------------------ events
+    def _event(
+        self,
+        track: ProductTrack,
+        ts: float,
+        event_type: EventType,
+        state_from: str | None = None,
+        **meta: Any,
+    ) -> InteractionEvent:
+        dwell = int(max(0.0, ts - track.first_seen) * 1000)
+        payload = {
+            "anchor": track.anchor.as_list() if track.anchor else None,
+            "displacement_px": round(track.displacement_px, 1),
+            "displaced": track.displaced,
+            "basket_overlap": round(track.basket_overlap, 3),
+            "settle_frames": track.settle_frames,
+            "frames_in_state": track.lift_frames or track.return_frames or track.basket_frames,
+        }
+        if state_from:
+            payload["state_from"] = state_from
+        payload.update(meta)
+        return InteractionEvent(
+            type=event_type,
+            ts=ts,
+            product_id=track.product_id,
+            product_name=track.product_name,
+            track_id=track.track_id,
+            confidence=round(track.score, 4),
+            bbox=track.box or BBox(0, 0, 0, 0),
+            state=track.state,
+            hand_id=track.hand_id,
+            session_id=track.session_id or self.session_id,
+            dwell_ms=dwell,
+            meta=payload,
+        )
+
+    # ---------------------------------------------------------------- snapshot
+    def snapshot(self, ts: float) -> list[dict[str, Any]]:
+        out = []
+        for track in sorted(self.tracks.values(), key=lambda t: t.track_id):
+            out.append(
+                {
+                    "track_id": track.track_id,
+                    "product_id": track.product_id,
+                    "product_name": track.product_name,
+                    "state": track.state.value,
+                    "anchor": track.anchor.as_list() if track.anchor else None,
+                    "anchor_confirmed": track.anchor_confirmed,
+                    "settle_frames": track.settle_frames,
+                    "box": track.box.as_list() if track.box else None,
+                    "score": round(track.score, 3),
+                    "touching": track.touched,
+                    "displaced": track.displaced,
+                    "displacement_px": round(track.displacement_px, 1),
+                    "basket_overlap": round(track.basket_overlap, 3),
+                    "hand_id": track.hand_id,
+                    "session_id": track.session_id or self.session_id,
+                    "lift_frames": track.lift_frames,
+                    "return_frames": track.return_frames,
+                    "basket_frames": track.basket_frames,
+                    "missed_frames": track.missed_frames,
+                    "age_s": round(ts - track.first_seen, 2),
+                    "in_state_s": round(ts - track.state_since, 2),
+                    "picked_up_at": track.picked_up_at,
+                }
+            )
+        return out

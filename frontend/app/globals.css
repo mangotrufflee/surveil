@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-ink-950 text-slate-200 antialiased;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  @apply bg-ink-900;
+}
+::-webkit-scrollbar-thumb {
+  @apply rounded bg-ink-600;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-ink-500;
+}
+
+@layer components {
+  .panel {
+    @apply rounded-xl border border-ink-700 bg-ink-900/70;
+  }
+  .panel-head {
+    @apply flex items-center justify-between border-b border-ink-700 px-4 py-2.5;
+  }
+  .panel-title {
+    @apply text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400;
+  }
+  .btn {
+    @apply inline-flex items-center gap-1.5 rounded-md border border-ink-600 bg-ink-800
+           px-3 py-1.5 text-xs font-medium text-slate-200 transition
+           hover:border-ink-500 hover:bg-ink-700 disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .btn-primary {
+    @apply border-emerald-600/60 bg-emerald-600/20 text-emerald-300
+           hover:border-emerald-500 hover:bg-emerald-600/30;
+  }
+  .btn-danger {
+    @apply border-rose-600/60 bg-rose-600/20 text-rose-300
+           hover:border-rose-500 hover:bg-rose-600/30;
+  }
+  .field {
+    @apply w-full rounded-md border border-ink-600 bg-ink-850 px-2.5 py-1.5
+           font-mono text-xs text-slate-200 outline-none transition
+           focus:border-emerald-500/70;
+  }
+  .label {
+    @apply mb-1 block text-[10px] font-medium uppercase tracking-wider text-slate-500;
+  }
+  .chip {
+    @apply inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold tracking-wide;
+  }
+  .th {
+    @apply px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-wider text-slate-500;
+  }
+  .td {
+    @apply px-3 py-2 align-top font-mono text-[11px] text-slate-300;
+  }
+}
