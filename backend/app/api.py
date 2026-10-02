@@ -18,8 +18,10 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from .config import get_settings
+from .hands import AVAILABLE_HAND_BACKENDS
+from .interaction import EventType, ProductState
 from .ledger import Ledger
-from .pipeline import Pipeline
+from .pipeline import HAND_BACKEND_HELP, Pipeline
 
 settings = get_settings()
 ledger = Ledger(settings.db_path)
@@ -97,6 +99,10 @@ class CheckoutRequest(BaseModel):
     session_id: str | None = None
     hand_id: int | None = None
     note: str = "confirmed by owner"
+
+
+class HandBackendRequest(BaseModel):
+    backend: str = Field(..., description="auto | onnx | pose | mediapipe | off")
 
 
 class ResolveRequest(BaseModel):
@@ -250,6 +256,29 @@ def set_basket_roi(body: BasketRoiRequest) -> dict[str, Any]:
     return {"basket_roi": settings.basket_roi}
 
 
+@app.get("/api/hand-backends")
+def hand_backends() -> dict[str, Any]:
+    return {
+        "configured": settings.hand_backend,
+        "active": pipeline.status.hand_backend,
+        "options": [
+            {"key": key, "label": key, "description": HAND_BACKEND_HELP.get(key, "")}
+            for key in AVAILABLE_HAND_BACKENDS
+        ],
+        "hand_model_present": settings.hand_onnx_path.exists(),
+    }
+
+
+@app.post("/api/hand-backend")
+def set_hand_backend(body: HandBackendRequest) -> dict[str, Any]:
+    try:
+        return pipeline.set_hand_backend(body.backend)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @app.patch("/api/settings/thresholds")
 def set_thresholds(body: ThresholdUpdate) -> dict[str, Any]:
     data = body.model_dump(exclude_none=True)
@@ -284,6 +313,7 @@ def events(
 @app.get("/api/stats")
 def stats() -> dict[str, Any]:
     s = ledger.stats()
+    pending_rows = ledger.open_pickups()
     return {
         "events": s.events,
         "picked_up": s.picked_up,
@@ -294,6 +324,8 @@ def stats() -> dict[str, Any]:
         "lost": s.lost,
         "unaccounted": s.unaccounted,
         "pending_basket": len(ledger.basket_holds()),
+        "pending_in_hand": sum(1 for r in pending_rows if r["type"] != EventType.PLACED_IN_BASKET.value),
+        "pending_total": len(pending_rows),
     }
 
 
@@ -315,9 +347,35 @@ def alerts() -> dict[str, Any]:
     }
 
 
+@app.get("/api/pending")
+def pending(session_id: str | None = None) -> dict[str, Any]:
+    """Products awaiting the owner's decision - IN_HAND or IN_BASKET.
+
+    An item only leaves this list once the owner confirms the sale or the CV
+    system sees it put back. `live_state` is the state machine's current
+    opinion, so the dashboard can badge IN HAND vs IN BASKET.
+    """
+    live = pipeline.snapshot().get("states", {})
+    rows = ledger.open_pickups(session_id=session_id)
+    for row in rows:
+        state = live.get(str(row.get("track_id")))
+        row["live_state"] = state["state"] if state else None
+        row["reason"] = (
+            "in_basket"
+            if row.get("type") == EventType.PLACED_IN_BASKET.value
+            or row.get("live_state") == ProductState.IN_BASKET.value
+            else "in_hand"
+        )
+    return {
+        "pending": rows,
+        "in_hand": sum(1 for r in rows if r["reason"] == "in_hand"),
+        "in_basket": sum(1 for r in rows if r["reason"] == "in_basket"),
+    }
+
+
 @app.get("/api/basket")
 def basket() -> dict[str, Any]:
-    """Products observed in the basket that the owner has not confirmed yet."""
+    """Backwards-compatible alias: only the IN_BASKET rows."""
     return {"pending": ledger.basket_holds()}
 
 

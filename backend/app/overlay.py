@@ -136,7 +136,8 @@ def render(
     rows = [
         f"fps {hud.get('fps', 0):.1f}   frame {hud.get('frame', 0)}",
         f"yolo {hud.get('infer_ms', 0):.0f}ms  hands {hud.get('hand_ms', 0):.0f}ms",
-        f"products {hud.get('product_count', 0)}  hands {hud.get('hand_count', 0)}",
+        f"products {hud.get('product_count', 0)}  hands {hud.get('hand_count', 0)}"
+        f"  [{hud.get('hand_backend', '?')}]",
         f"people in frame {ignored_count} (not tracked)",
         f"session {hud.get('session_id', '-')}",
         f"displace>{hud.get('shelf_displacement_px', 0):.0f}px  confirm {hud.get('lift_confirm_frames', 0)}f"
@@ -144,5 +145,15 @@ def render(
     ]
     for i, row in enumerate(rows):
         _text(img, row, (8, 16 + i * 16), 0.42, (235, 235, 235), 1)
+
+    if hud.get("hands_blind"):
+        # hand detection sees nothing -> nothing can leave ON_SHELF
+        banner = "NO HANDS DETECTED - pickups cannot be confirmed (try the pose backend)"
+        (tw, th), _ = cv2.getTextSize(banner, FONT, 0.5, 1)
+        bx1, by1 = width - tw - 24, 10
+        bx2, by2 = width - 10, 10 + th + 12
+        cv2.rectangle(img, (bx1, by1), (bx2, by2), (0, 0, 0), -1)
+        cv2.rectangle(img, (bx1, by1), (bx2, by2), (60, 60, 235), 1)
+        _text(img, banner, (bx1 + 8, by2 - 8), 0.5, (120, 120, 255), 1)
 
     return img

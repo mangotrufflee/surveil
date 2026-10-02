@@ -14,7 +14,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import ThresholdSettings  # noqa: E402
-from app.geometry import BBox, overlap_ratio  # noqa: E402
+from app.geometry import BBox, center_distance, overlap_ratio  # noqa: E402
 from app.hands import HandBox  # noqa: E402
 from app.interaction import (  # noqa: E402
     EventType,
@@ -274,6 +274,111 @@ def test_two_products_are_tracked_independently():
     assert [e.type for e in events] == [EventType.PICKED_UP]
     assert events[0].product_name == "bottle"
     assert events[0].track_id == 1
+
+
+# --------------------------------------------------------------- jitter
+# A slow steady drift of 2px/frame plus +/-2px jitter. Every single frame-to-frame
+# step stays well inside settle_motion_px, while the cumulative distance from the
+# first sighting grows past it within a few frames.
+JITTER = [(0, 0), (2, -2), (-2, 1), (1, 2), (-1, -1), (2, 1)]
+
+
+def jittered_box(i: int, x: float, y: float = 200.0) -> BBox:
+    dx, dy = JITTER[i % len(JITTER)]
+    return box_at(x + dx + 2 * i, y + dy)
+
+
+def test_anchor_settles_despite_drift_and_jitter():
+    """REGRESSION: settling must measure frame-to-frame movement.
+
+    Measuring drift from the anchor makes the error accumulate until it always
+    exceeds the threshold, so the anchor never confirms and - because the whole
+    state machine used to be gated behind confirmation - every product sat at
+    ON_SHELF forever.
+    """
+    engine = make_engine()
+    frames = T.settle_frames + 2
+
+    for i in range(frames):
+        engine.update(
+            frame=i,
+            ts=100.0 + i * 0.05,
+            products=[product(1, jittered_box(i, 300))],
+            hands=[],
+            basket_zone=None,
+        )
+
+    track = engine.tracks[1]
+    first = jittered_box(0, 300)
+    cumulative = center_distance(track.box, first)
+
+    # guard: the scenario must actually break a cumulative-drift implementation
+    assert cumulative > T.settle_motion_px, "test is not exercising the regression"
+    assert track.anchor_confirmed is True, "jitter must not prevent settling"
+    assert track.state is ProductState.ON_SHELF
+
+
+def test_full_pickup_still_works_with_jitter():
+    """The end-to-end journey must survive a noisy detector."""
+    engine = make_engine()
+    for i in range(T.settle_frames + 2):
+        engine.update(
+            frame=i,
+            ts=100.0 + i * 0.05,
+            products=[product(1, jittered_box(i, 300))],
+            hands=[],
+            basket_zone=None,
+        )
+    assert engine.tracks[1].anchor_confirmed is True
+    settled = engine.tracks[1].anchor
+
+    events = []
+    for i in range(T.touch_emit_frames + T.lift_confirm_frames + 2):
+        events.extend(
+            engine.update(
+                frame=100 + i,
+                ts=200.0 + i * 0.05,
+                products=[product(1, jittered_box(i, 300))],
+                hands=hands((1, box_at(290, 190))),
+                basket_zone=None,
+            )
+        )
+    # touched but never displaced -> TOUCH only, still on the shelf
+    assert [e.type for e in events].count(EventType.PICKED_UP) == 0
+    assert engine.tracks[1].state is ProductState.ON_SHELF
+
+    # now carry it well away from the settled anchor
+    events = []
+    for i in range(T.lift_confirm_frames + 1):
+        box = box_at(settled.center[0] + 120 * (i + 1), 400)
+        events.extend(
+            engine.update(
+                frame=200 + i,
+                ts=300.0 + i * 0.05,
+                products=[product(1, box)],
+                hands=hands((1, BBox(box.x1 - 10, box.y1 - 10, box.x2 + 10, box.y2 + 10))),
+                basket_zone=None,
+            )
+        )
+    assert EventType.PICKED_UP in [e.type for e in events]
+    assert engine.tracks[1].state is ProductState.IN_HAND
+
+
+def test_a_brand_new_track_can_never_be_displaced():
+    """No settling gate is needed: a new track's anchor IS its box."""
+    engine = make_engine()
+    for i in range(4):
+        engine.update(
+            frame=i,
+            ts=100.0 + i * 0.05,
+            products=[product(7, box_at(300 + i * 2, 200))],
+            hands=hands((1, box_at(295, 195))),
+            basket_zone=None,
+        )
+    track = engine.tracks[7]
+    assert track.anchor_confirmed is False
+    assert track.displaced is False
+    assert track.state is ProductState.ON_SHELF
 
 
 if __name__ == "__main__":

@@ -14,12 +14,20 @@ import numpy as np
 from . import overlay
 from .camera import CameraSource
 from .config import Settings
-from .detection import FrameDetections, ProductDetector
+from .detection import FrameDetections, ProductDetector, resolve_basket_zone
 from .hand_tracking import HandIdentityTracker
-from .hands import HandBox, build_hand_detector
+from .hands import AVAILABLE_HAND_BACKENDS, HandBox, build_hand_detector
 from .interaction import EventType, InteractionEngine, ProductState
 from .ledger import Ledger
 from .tracking import ByteTracker
+
+HAND_BACKEND_HELP = {
+    "auto": "use the converted handtracking model if present, else mediapipe",
+    "onnx": "the imported victordibia/handtracking SSD model (egocentric - trained on EgoHands)",
+    "pose": "YOLO pose wrist keypoints as a hand-box proxy (third-person views)",
+    "mediapipe": "MediaPipe hands fallback",
+    "off": "disable hand detection - nothing can leave ON_SHELF without it",
+}
 
 
 @dataclass
@@ -81,6 +89,7 @@ class Pipeline:
         self._snapshot: dict[str, Any] = self._empty_snapshot()
         self._events: list[dict[str, Any]] = []
         self._frame_lock = threading.Lock()
+        self._last_hand_seen: float | None = None
 
     # ------------------------------------------------------------------ status
     @property
@@ -199,7 +208,7 @@ class Pipeline:
             self._running = True
             self.status.running = True
             self.status.started_at = time.time()
-            self.status.basket_mode = "yolo" if self.detector.product_class_ids() else "roi"
+            self.status.basket_mode = self._basket_mode()
             self.ledger.open_session(
                 self.session_id,
                 str(settings.camera_source),
@@ -208,6 +217,62 @@ class Pipeline:
 
             self._thread = threading.Thread(target=self._loop, daemon=True, name="pipeline")
             self._thread.start()
+
+    def _hands_blind(self, ts: float, hand_count: int, grace: float = 5.0) -> bool:
+        """True when hand detection has produced nothing for `grace` seconds.
+
+        `touched` gates the LIFTING transition, so a hand model that cannot see
+        anything looks exactly like a broken state machine. Surfacing it stops
+        that being a silent mystery.
+        """
+        if self.status.hand_backend in ("off", None):
+            return False
+        if hand_count > 0:
+            self._last_hand_seen = ts
+            return False
+        if self._last_hand_seen is None:
+            self._last_hand_seen = ts
+            return False
+        return (ts - self._last_hand_seen) >= grace
+
+    def _basket_mode(self) -> str:
+        """Whether the basket zone comes from a model class or a drawn region."""
+        basket_names = {n.lower() for n in self.settings.basket_class_names}
+        model_names = {n.lower() for n in self.detector.class_names()} if self.detector else set()
+        if model_names & basket_names:
+            return "yolo"
+        return "roi" if self.settings.basket_roi else "none"
+
+    def set_hand_backend(self, backend: str) -> dict[str, Any]:
+        """Swap the hand detector without restarting the session.
+
+        Serialised against `_process`, so the swap waits for the in-flight
+        frame's inference to finish rather than closing a model underneath it.
+        """
+        from .hands import AVAILABLE_HAND_BACKENDS
+
+        if backend not in AVAILABLE_HAND_BACKENDS:
+            raise ValueError(
+                f"unknown hand backend {backend!r}; expected one of {AVAILABLE_HAND_BACKENDS}"
+            )
+        with self._lock:
+            previous = self.settings.hand_backend
+            self.settings.hand_backend = backend
+            try:
+                detector = build_hand_detector(self.settings)
+            except Exception:
+                self.settings.hand_backend = previous
+                raise
+            old = self.hand_detector
+            self.hand_detector = detector
+            self.status.hand_backend = detector.name
+        if old is not None and old is not detector:
+            old.close()
+        return {
+            "hand_backend": backend,
+            "resolved": detector.name,
+            "description": HAND_BACKEND_HELP.get(backend, ""),
+        }
 
     def stop(self) -> None:
         with self._lock:
@@ -251,12 +316,17 @@ class Pipeline:
         assert self.engine is not None and self.hand_tracker is not None
 
         det: FrameDetections = self.detector.detect(image, self.tracker)
+        basket_zone = resolve_basket_zone(
+            det.baskets, self.settings.basket_roi, image.shape[1], image.shape[0]
+        )
 
         # ---- hands ------------------------------------------------------
         hand_ms = 0.0
-        if self.hand_detector is not None:
+        with self._lock:
+            active_hand_detector = self.hand_detector
+        if active_hand_detector is not None:
             t0 = time.perf_counter()
-            raw_hands: list[HandBox] = self.hand_detector.detect(image)
+            raw_hands: list[HandBox] = active_hand_detector.detect(image)
             hand_ms = (time.perf_counter() - t0) * 1000.0
         else:
             raw_hands = []
@@ -274,7 +344,7 @@ class Pipeline:
             ts=ts,
             products=engine_input,
             hands=hand_input,
-            basket_zone=det.basket_zone,
+            basket_zone=basket_zone,
         )
 
         # ---- ledger ------------------------------------------------------
@@ -332,12 +402,13 @@ class Pipeline:
                 for t in det.tracks
             ],
             "hands": self.hand_tracker.snapshot(),
-            "basket_zone": det.basket_zone.as_list() if det.basket_zone else None,
+            "basket_zone": basket_zone.as_list() if basket_zone else None,
             "basket_source": "yolo" if det.baskets else (
-                "roi" if self.settings.basket_roi else "none"
+                "roi" if basket_zone else "none"
             ),
             "ignored_count": len(det.ignored),
             "ignored_classes": list(self.settings.ignored_classes),
+            "hands_blind": self._hands_blind(ts, len(tracked_hands)),
             "states": {str(s["track_id"]): s for s in states},
             "hud": {
                 "fps": round(self.status.fps, 2),
@@ -346,6 +417,8 @@ class Pipeline:
                 "hand_ms": round(hand_ms, 1),
                 "product_count": len(det.tracks),
                 "hand_count": len(tracked_hands),
+                "hands_blind": self._hands_blind(ts, len(tracked_hands)),
+                "hand_backend": self.status.hand_backend,
                 "session_id": self._session_id,
                 "shelf_displacement_px": self.settings.thresholds.shelf_displacement_px,
                 "lift_confirm_frames": self.settings.thresholds.lift_confirm_frames,
@@ -363,7 +436,7 @@ class Pipeline:
             image,
             states,
             snapshot["hands"],
-            det.basket_zone,
+            basket_zone,
             snapshot["hud"],
             ignored_count=len(det.ignored),
             events_recent=self._events[-4:],

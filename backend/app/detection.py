@@ -32,6 +32,43 @@ class RawDetection:
     role: str  # "product" | "basket" | "ignored"
 
 
+def roi_to_bbox(roi: list[float], width: int, height: int) -> BBox:
+    """Convert a normalised [x, y, w, h] region into pixel coordinates."""
+    x, y, w, h = roi
+    return BBox(
+        clamp(x * width, 0, width),
+        clamp(y * height, 0, height),
+        clamp((x + w) * width, 0, width),
+        clamp((y + h) * height, 0, height),
+    )
+
+
+def resolve_basket_zone(
+    detections: list[RawDetection],
+    roi: list[float] | None,
+    width: int,
+    height: int,
+) -> BBox | None:
+    """Prefer a detected basket class; fall back to the drawn region.
+
+    Applied by the pipeline rather than by ProductDetector so the rule holds for
+    any detection source and the live snapshot always agrees with what the
+    state machine is actually using.
+    """
+    if detections:
+        largest = max(detections, key=lambda d: d.bbox.area)
+        zone = largest.bbox
+        for other in detections:
+            if other is largest:
+                continue
+            if other.bbox.area > zone.area:
+                zone = union(zone, other.bbox)
+        return zone
+    if roi:
+        return roi_to_bbox(roi, width, height)
+    return None
+
+
 @dataclass
 class FrameDetections:
     tracks: list[TrackResult]
@@ -93,13 +130,7 @@ class ProductDetector:
 
     @staticmethod
     def _roi_to_bbox(roi: list[float], width: int, height: int) -> BBox:
-        x, y, w, h = roi
-        return BBox(
-            clamp(x * width, 0, width),
-            clamp(y * height, 0, height),
-            clamp((x + w) * width, 0, width),
-            clamp((y + h) * height, 0, height),
-        )
+        return roi_to_bbox(roi, width, height)
 
     # ----------------------------------------------------------------- detect
     def detect(self, frame: np.ndarray, tracker: ByteTracker) -> FrameDetections:
@@ -151,20 +182,13 @@ class ProductDetector:
         valid_ids = set(self._product_class_ids)
         tracks = [t for t in tracks if t.class_id in valid_ids]
 
-        basket_zone: BBox | None = None
-        if baskets:
-            largest = max(baskets, key=lambda b: b.bbox.area)
-            basket_zone = largest.bbox
-            if len(baskets) > 1:
-                basket_zone = union(basket_zone, max(baskets[1:], key=lambda b: b.bbox.area).bbox)
-        elif self.settings.basket_roi:
-            basket_zone = self._roi_to_bbox(self.settings.basket_roi, w, h)
-
+        # A detected basket class wins; the drawn region is applied by the
+        # pipeline so it applies uniformly to every detection source.
         return FrameDetections(
             tracks=tracks,
             raw_products=products,
             baskets=baskets,
             ignored=ignored,
-            basket_zone=basket_zone,
+            basket_zone=None,
             infer_ms=(time.perf_counter() - t0) * 1000.0,
         )

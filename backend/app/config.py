@@ -20,7 +20,9 @@ class ThresholdSettings(BaseSettings):
     # ON_SHELF -> LIFTING
     shelf_displacement_px: float = 60.0
     settle_frames: int = 15
-    settle_motion_px: float = 6.0
+    # Frame-to-frame movement still counts as "not moving". Must tolerate YOLO
+    # box jitter on a live feed; too tight and the shelf anchor never settles.
+    settle_motion_px: float = 8.0
     hand_touch_px: float = 20.0
     hand_touch_min_overlap: float = 0.05
 
@@ -90,7 +92,8 @@ class Settings(BaseSettings):
     tracker_second_match_threshold: float = 0.15
 
     # ---- hand detection (victordibia/handtracking) ----------------------
-    hand_backend: str = "auto"  # auto | onnx | mediapipe | off
+    # auto | onnx | pose | mediapipe | off
+    hand_backend: str = "auto"
     hand_onnx_path: Path = REPO_ROOT / "backend" / "models" / "hand_ssd_mobilenet.onnx"
     hand_label_map_path: Path = (
         REPO_ROOT / "vendor" / "handtracking" / "hand_inference_graph" / "hand_label_map.pbtxt"
@@ -101,9 +104,16 @@ class Settings(BaseSettings):
     hand_max_detections: int = 10
     hand_enabled: bool = True
 
-    # ---- basket zone fallback -------------------------------------------
-    # Used when the YOLO model has no basket class of its own. Normalised xywh.
-    basket_roi: list[float] | None = None
+    # pose fallback: wrist keypoints (COCO idx 9/10) as a hand-box proxy
+    pose_model: str = "yolo11n-pose.pt"
+    pose_wrist_conf: float = 0.4
+    pose_hand_box_size: float = 90.0
+
+    # ---- basket zone -----------------------------------------------------
+    # Preferred source is a `basket` class in the YOLO model. Stock COCO has no
+    # such class, so this normalised [x, y, w, h] region is the working
+    # fallback; redraw it on the live feed for the actual shelf.
+    basket_roi: list[float] | None = Field(default_factory=lambda: [0.66, 0.58, 0.32, 0.40])
 
     # ---- ledger ----------------------------------------------------------
     db_path: Path = REPO_ROOT / "data" / "surveil.db"

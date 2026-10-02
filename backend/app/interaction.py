@@ -73,6 +73,7 @@ class ProductTrack:
     product_name: str
     state: ProductState = ProductState.ON_SHELF
     box: BBox | None = None
+    prev_box: BBox | None = None
     anchor: BBox | None = None
     anchor_confirmed: bool = False
     settle_frames: int = 0
@@ -164,27 +165,11 @@ class InteractionEngine:
                 track.anchor = box
                 self.tracks[track_id] = track
 
+            track.prev_box = track.box
             track.box = box
             track.score = score
             track.last_seen = ts
             track.missed_frames = 0
-
-            # --- settle / learn the shelf anchor --------------------------
-            # The anchor is only learnt during the initial settling phase. Once
-            # confirmed it is FROZEN: re-learning it while the product is being
-            # lifted would make the displacement always read as 0 and the
-            # pickup would never be confirmed. A fresh anchor is written only
-            # on a confirmed PUT_BACK.
-            if not track.anchor_confirmed and track.anchor is not None:
-                drift = center_distance(box, track.anchor)
-                if drift <= self.t.settle_motion_px and not track.touched:
-                    track.settle_frames += 1
-                    if track.settle_frames >= self.t.settle_frames:
-                        track.anchor = box
-                        track.anchor_confirmed = True
-                else:
-                    track.settle_frames = 0
-                    track.anchor = box
 
             # --- signals ---------------------------------------------------
             track.touched, hand_id = self._touching(box, hands)
@@ -215,23 +200,23 @@ class InteractionEngine:
         out: list[InteractionEvent] = []
         t = self.t
 
-        if not track.anchor_confirmed:
-            # Anchor still settling - do not interpret motion as an interaction.
-            track.lift_frames = 0
-            track.return_frames = 0
-            track.basket_frames = 0
-            track.touch_frames = 0
-            if track.touched:
-                track.touch_frames += 1
-                if track.touch_frames >= t.touch_emit_frames and not track.touch_emitted:
-                    track.touch_emitted = True
-                    out.append(self._event(track, ts, EventType.TOUCH))
-            else:
-                track.touch_frames = 0
-                track.touch_emitted = False
-            return out
-
         if track.state is ProductState.ON_SHELF:
+            # Learn the shelf anchor from *frame-to-frame* movement while the
+            # product sits still and untouched. Using distance-from-anchor here
+            # would accumulate detection jitter until it always exceeded the
+            # settle threshold, so the anchor would never confirm.
+            moved_little = (
+                track.prev_box is None
+                or center_distance(track.box, track.prev_box) <= t.settle_motion_px
+            )
+            if not track.touched and moved_little:
+                track.settle_frames += 1
+                if track.settle_frames >= t.settle_frames:
+                    track.anchor = track.box
+                    track.anchor_confirmed = True
+            else:
+                track.settle_frames = 0
+
             track.basket_frames = 0
             track.return_frames = 0
             track.lift_frames = 0
@@ -287,9 +272,11 @@ class InteractionEngine:
                 if track.return_frames >= t.return_confirm_frames:
                     track.set_state(ProductState.ON_SHELF, ts)
                     track.on_shelf_since = ts
+                    # the product is back where it was put down; let the anchor
+                    # re-confirm naturally now that we are back on the shelf
                     track.anchor = track.box
-                    track.anchor_confirmed = True
-                    track.settle_frames = t.settle_frames
+                    track.anchor_confirmed = False
+                    track.settle_frames = 0
                     track.touch_emitted = False
                     track.basket_frames = 0
                     track.picked_up_at = None

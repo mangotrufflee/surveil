@@ -20,6 +20,7 @@ import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -217,6 +218,71 @@ class MediapipeHandDetector(BaseHandDetector):
         self.hands.close()
 
 
+class PoseHandDetector(BaseHandDetector):
+    """Wrist-keypoint proxy from a stock YOLO *pose* checkpoint.
+
+    The handtracking model was trained on EgoHands (egocentric, Google Glass
+    view). Pointed at a shelf from a laptop camera it can see nothing, and since
+    `touched` gates the LIFTING transition a blind hand model means no product
+    ever leaves ON_SHELF. This backend needs no training data: a pose model
+    predicts 17 COCO keypoints per person, including the wrists (indices 9 and
+    10), so a square proxy box around each visible wrist stands in for a hand.
+
+    Coarser than a real detector - it knows nothing about the hand's extent or
+    orientation - but it is enough to drive the hand/product geometry checks.
+    """
+
+    name = "pose"
+    LEFT_WRIST = 9
+    RIGHT_WRIST = 10
+
+    def __init__(
+        self,
+        model_path: str = "yolo11n-pose.pt",
+        conf_threshold: float = 0.4,
+        wrist_conf: float = 0.4,
+        box_size: float = 90.0,
+        device: str = "",
+    ) -> None:
+        from ultralytics import YOLO
+
+        self.model = YOLO(model_path)
+        self.conf_threshold = conf_threshold
+        self.wrist_conf = wrist_conf
+        self.box_size = box_size
+        self.device = device
+        self._lock = threading.Lock()
+
+    def detect(self, frame_bgr: np.ndarray) -> list[HandBox]:
+        kwargs: dict[str, Any] = {"conf": self.conf_threshold, "verbose": False}
+        if self.device:
+            kwargs["device"] = self.device
+        with self._lock:
+            results = self.model(frame_bgr, **kwargs)
+
+        result = results[0]
+        keypoints = getattr(result, "keypoints", None)
+        if keypoints is None or keypoints.data is None:
+            return []
+
+        half = self.box_size / 2.0
+        out: list[HandBox] = []
+        for person in keypoints.data.cpu().numpy():
+            for idx in (self.LEFT_WRIST, self.RIGHT_WRIST):
+                if idx >= len(person):
+                    continue
+                x, y, v = person[idx]
+                if v < self.wrist_conf:
+                    continue
+                out.append(
+                    HandBox(
+                        bbox=BBox(float(x - half), float(y - half), float(x + half), float(y + half)),
+                        score=float(v),
+                    )
+                )
+        return out
+
+
 class NullHandDetector(BaseHandDetector):
     name = "off"
 
@@ -225,13 +291,14 @@ class NullHandDetector(BaseHandDetector):
 
 
 def build_hand_detector(settings) -> BaseHandDetector:
-    """Resolve ``SURVEIL_HAND_BACKEND`` = auto | onnx | mediapipe | off."""
+    """Resolve ``SURVEIL_HAND_BACKEND`` = auto | onnx | mediapipe | pose | off."""
     if not settings.hand_enabled or settings.hand_backend == "off":
         return NullHandDetector()
 
     errors: list[str] = []
-    want_onnx = settings.hand_backend in ("auto", "onnx")
-    if want_onnx:
+    backend = settings.hand_backend
+
+    if backend in ("auto", "onnx"):
         try:
             return OnnxHandDetector(
                 model_path=Path(settings.hand_onnx_path),
@@ -244,16 +311,31 @@ def build_hand_detector(settings) -> BaseHandDetector:
         except Exception as exc:  # noqa: BLE001
             errors.append(f"onnx: {exc}")
 
-    if settings.hand_backend in ("auto", "mediapipe"):
+    if backend == "pose":
+        try:
+            return PoseHandDetector(
+                model_path=settings.pose_model,
+                conf_threshold=max(0.3, settings.hand_conf_threshold),
+                wrist_conf=settings.pose_wrist_conf,
+                box_size=settings.pose_hand_box_size,
+                device=settings.yolo_device,
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"pose: {exc}")
+
+    if backend == "mediapipe":
         try:
             return MediapipeHandDetector(conf_threshold=max(0.35, settings.hand_conf_threshold))
         except Exception as exc:  # noqa: BLE001
             errors.append(f"mediapipe: {exc}")
 
-    if settings.hand_backend == "onnx":
+    if backend in ("onnx", "pose", "mediapipe"):
         raise RuntimeError(
-            "hand_backend=onnx but the hand model could not be loaded: "
+            f"hand_backend={backend} could not be loaded: "
             + "; ".join(errors)
-            + ". Run: python tools/convert_hand_model.py"
+            + ". Run: python tools/convert_hand_model.py (onnx backend)"
         )
     return NullHandDetector()
+
+
+AVAILABLE_HAND_BACKENDS = ["auto", "onnx", "pose", "mediapipe", "off"]

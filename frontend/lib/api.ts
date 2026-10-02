@@ -44,6 +44,14 @@ export const api = {
   setThresholds: (patch: Record<string, number | boolean>) =>
     send<{ thresholds: Thresholds }>("/api/settings/thresholds", "PATCH", patch),
 
+  handBackends: () => get<HandBackends>("/api/hand-backends"),
+  setHandBackend: (backend: string) =>
+    send<{ hand_backend: string; resolved: string; description: string }>(
+      "/api/hand-backend",
+      "POST",
+      { backend },
+    ),
+
   events: (params: EventQuery) => {
     const q = new URLSearchParams();
     Object.entries(params).forEach(([k, v]) => {
@@ -55,6 +63,8 @@ export const api = {
   products: () => get<{ products: ProductRow[] }>("/api/products"),
   alerts: () => get<{ alerts: Alert[]; grace_seconds: number }>("/api/alerts"),
   basket: () => get<{ pending: LedgerEvent[] }>("/api/basket"),
+  pending: (sessionId?: string) =>
+    get<PendingResponse>(`/api/pending${sessionId ? `?session_id=${sessionId}` : ""}`),
   purchases: () => get<{ purchases: LedgerEvent[] }>("/api/purchases"),
   sessions: () => get<{ sessions: SessionRow[] }>("/api/sessions"),
 
@@ -229,6 +239,7 @@ export interface LiveSnapshot {
   basket_source: string;
   ignored_count: number;
   ignored_classes: string[];
+  hands_blind: boolean;
   states: Record<string, TrackState>;
   hud: Record<string, number | string>;
   recent_events: LiveEvent[];
@@ -278,6 +289,32 @@ export interface Stats {
   lost: number;
   unaccounted: number;
   pending_basket: number;
+  pending_in_hand: number;
+  pending_total: number;
+}
+
+export interface PendingRow extends LedgerEvent {
+  live_state: ProductState | null;
+  reason: "in_hand" | "in_basket";
+}
+
+export interface PendingResponse {
+  pending: PendingRow[];
+  in_hand: number;
+  in_basket: number;
+}
+
+export interface HandBackendOption {
+  key: string;
+  label: string;
+  description: string;
+}
+
+export interface HandBackends {
+  configured: string;
+  active: string;
+  options: HandBackendOption[];
+  hand_model_present: boolean;
 }
 
 export interface ProductRow {

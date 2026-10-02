@@ -296,6 +296,76 @@ class Ledger:
         )
 
     # ------------------------------------------------------- derived views
+    def open_pickups(self, limit: int = 200, session_id: str | None = None) -> list[dict[str, Any]]:
+        """Products the owner still has to act on, whether or not they reached
+        the basket.
+
+        Two kinds of outstanding row, both sellable:
+          * PICKED_UP with nothing after it - the product is IN_HAND (or the
+            camera lost sight of it) and still needs a decision;
+          * PLACED_IN_BASKET with no CHECKED_OUT - it reached the basket.
+
+        Ordering uses the autoincrement id rather than the timestamp, because two
+        events recorded in the same tick share a timestamp and a `ts >=` test
+        would then match the wrong row.
+        """
+        session_clause = ""
+        if session_id:
+            session_clause = "AND e.session_id = ?"
+
+        # Bindings must follow the placeholder order in the SQL below:
+        #   1  PICKED_UP           (e.type, in-hand branch)
+        #   2  PLACED_IN_BASKET    (the "resolved the pickup" list)
+        #   3  PUT_BACK            ("            ")
+        #   4  CHECKED_OUT         ("            ")
+        #   5  TRACK_LOST          ("            ")
+        #   6  PLACED_IN_BASKET    (e.type, in-basket branch)
+        #   7  CHECKED_OUT         (resolved the basket)
+        #   8  [session_id]
+        #   9  limit
+        params: list[Any] = [
+            EventType.PICKED_UP.value,
+            EventType.PLACED_IN_BASKET.value,
+            EventType.PUT_BACK.value,
+            EventType.CHECKED_OUT.value,
+            EventType.TRACK_LOST.value,
+            EventType.PLACED_IN_BASKET.value,
+            EventType.CHECKED_OUT.value,
+        ]
+        if session_id:
+            params.append(session_id)
+
+        sql = f"""
+        SELECT e.* FROM events e
+        WHERE (
+                (e.type = ?
+                 AND NOT EXISTS (
+                     SELECT 1 FROM events x
+                     WHERE x.product_id = e.product_id
+                       AND x.track_id = e.track_id
+                       AND x.session_id IS e.session_id
+                       AND x.id > e.id
+                       AND x.type IN (?, ?, ?, ?)
+                 ))
+             OR (e.type = ?
+                 AND NOT EXISTS (
+                     SELECT 1 FROM events x
+                     WHERE x.product_id = e.product_id
+                       AND x.track_id = e.track_id
+                       AND x.session_id IS e.session_id
+                       AND x.id > e.id
+                       AND x.type = ?
+                 ))
+              )
+          {session_clause}
+        ORDER BY e.ts ASC
+        LIMIT ?
+        """
+        params.append(limit)
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [self._row_to_event(r) for r in rows]
+
     def basket_holds(self) -> list[dict[str, Any]]:
         """Products that reached IN_BASKET and were never checked out."""
         sql = """
@@ -303,7 +373,7 @@ class Ledger:
         WHERE e.type = ?
           AND e.resolved = 0
           AND e.id = (SELECT MAX(id) FROM events x
-                      WHERE x.product_id = e.product_id AND x.session_id = e.session_id)
+                      WHERE x.product_id = e.product_id AND x.session_id IS e.session_id)
         ORDER BY e.ts ASC
         """
         with self._lock:
@@ -326,12 +396,12 @@ class Ledger:
         WHERE e.type = ?
           AND e.ts <= ?
           {session_clause}
-          AND NOT EXISTS (
+AND NOT EXISTS (
               SELECT 1 FROM events x
               WHERE x.product_id = e.product_id
                 AND x.track_id = e.track_id
-                AND x.session_id = e.session_id
-                AND x.ts >= e.ts
+                AND x.session_id IS e.session_id
+                AND x.id > e.id
                 AND x.type IN (?, ?, ?, ?)
           )
         ORDER BY e.ts DESC

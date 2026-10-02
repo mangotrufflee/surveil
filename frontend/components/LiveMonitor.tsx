@@ -6,7 +6,8 @@ import { usePolling } from "@/lib/usePolling";
 import { StateBadge, EventBadge } from "@/components/Badges";
 import { ago, clock } from "@/lib/format";
 import ThresholdsPanel from "@/components/ThresholdsPanel";
-import BasketRoiPanel from "@/components/BasketRoiPanel";
+import BasketRoiPicker from "@/components/BasketRoiPicker";
+import HandBackendPicker from "@/components/HandBackendPicker";
 import StateMachinePanel from "@/components/StateMachinePanel";
 
 export default function LiveMonitor() {
@@ -49,6 +50,16 @@ export default function LiveMonitor() {
   const hands = snap?.hands ?? [];
   const events = (snap?.recent_events ?? []).slice().reverse();
 
+  // The live snapshot reports the zone actually in use, in frame pixels; convert
+  // it back to the normalised [x, y, w, h] the picker draws with.
+  const liveRoi = ((): [number, number, number, number] | null => {
+    if (!snap?.basket_zone || !snap.frame_size) return null;
+    const [fw, fh] = snap.frame_size;
+    if (!fw || !fh) return null;
+    const [x1, y1, x2, y2] = snap.basket_zone;
+    return [x1 / fw, y1 / fh, (x2 - x1) / fw, (y2 - y1) / fh];
+  })();
+
   return (
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
       {/* ------------------------------------------------------ stream column */}
@@ -77,6 +88,14 @@ export default function LiveMonitor() {
                   title="The person class is counted but never boxed, highlighted or tracked."
                 >
                   {snap.ignored_count} {snap.ignored_classes.join("/")} in frame - not tracked
+                </span>
+              )}
+              {snap?.hands_blind && (
+                <span
+                  className="chip border-rose-500/50 bg-rose-500/15 text-rose-300"
+                  title="Hand detection sees nothing, so no product can leave ON_SHELF. Switch the hand backend in the thresholds panel."
+                >
+                  no hands detected - pickups cannot be confirmed
                 </span>
               )}
             </div>
@@ -157,9 +176,16 @@ export default function LiveMonitor() {
           <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <ThresholdsPanel onSaved={() => { refresh(); refreshStatus(); }} />
             <div className="space-y-4">
-              <BasketRoiPanel
-                roi={((status?.basket_mode ?? "none") as string) !== "none" ? snap?.basket_source ?? null : null}
+              <BasketRoiPicker
+                frameSize={snap?.frame_size ?? null}
+                roi={liveRoi}
+                detected={status?.basket_mode === "yolo"}
+                disabled={!running}
                 onSaved={() => { refresh(); refreshStatus(); }}
+              />
+              <HandBackendPicker
+                handsBlind={snap?.hands_blind}
+                onChanged={refreshStatus}
               />
               <StateMachinePanel />
             </div>

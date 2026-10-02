@@ -6,6 +6,8 @@ import {
   LEDGER_EXPORT_URL,
   type Alert,
   type LedgerEvent,
+  type PendingResponse,
+  type PendingRow,
   type ProductRow,
   type SessionRow,
   type Stats,
@@ -30,7 +32,10 @@ export default function OwnerDashboard() {
   const [error, setError] = useState<string | null>(null);
 
   const { data: stats } = usePolling<Stats>(() => api.stats(), 2000);
-  const { data: basket } = usePolling(() => api.basket(), 2000);
+  const { data: pending, refresh: refreshPending } = usePolling<PendingResponse>(
+    () => api.pending(),
+    2000,
+  );
   const { data: purchases } = usePolling(() => api.purchases(), 4000);
   const { data: alerts } = usePolling(() => api.alerts(), 3000);
   const { data: products } = usePolling(() => api.products(), 5000);
@@ -49,11 +54,12 @@ export default function OwnerDashboard() {
         await fn();
         setNote(label);
         refreshEvents();
+        refreshPending();
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       }
     },
-    [refreshEvents],
+    [refreshEvents, refreshPending],
   );
 
   return (
@@ -63,7 +69,7 @@ export default function OwnerDashboard() {
         <Kpi label="Events" value={stats?.events} />
         <Kpi label="Picked up" value={stats?.picked_up} tone="hand" />
         <Kpi label="Put back" value={stats?.put_back} tone="returning" />
-        <Kpi label="In basket" value={stats?.pending_basket} tone="basket" />
+        <Kpi label="To confirm" value={stats?.pending_total} tone={stats?.pending_total ? "basket" : undefined} />
         <Kpi label="Checked out" value={stats?.checked_out} tone="ok" />
         <Kpi label="Touch" value={stats?.touch} />
         <Kpi label="Tracks lost" value={stats?.lost} tone="lost" />
@@ -122,46 +128,77 @@ export default function OwnerDashboard() {
         <section className="panel">
           <div className="panel-head">
             <span className="panel-title">Awaiting owner confirmation</span>
-            <span className="font-mono text-[10px] text-state-basket">
-              {basket?.pending.length ?? 0}
+            <span className="flex gap-1 font-mono text-[10px]">
+              <span className="text-state-hand">{pending?.in_hand ?? 0} in hand</span>
+              <span className="text-state-basket">{pending?.in_basket ?? 0} in basket</span>
             </span>
           </div>
           <div className="max-h-80 space-y-1.5 overflow-y-auto p-2">
-            {(basket?.pending ?? []).map((e: LedgerEvent) => (
-              <div
-                key={e.event_uid}
-                className="rounded-lg border border-state-basket/25 bg-state-basket/5 p-2.5"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-medium text-slate-100">
-                    {e.product_name}
-                  </span>
-                  <span className="font-mono text-[10px] text-slate-500">#{e.track_id}</span>
-                </div>
-                <div className="mt-1 font-mono text-[10px] text-slate-500">
-                  basket {stamp(e.ts)} &middot; session {e.session_id ?? "-"}
-                  {e.hand_id != null ? ` · hand ${e.hand_id}` : ""}
-                </div>
-                <button
-                  className="btn btn-primary mt-2 w-full justify-center"
-                  onClick={() =>
-                    act(`Checked out ${e.product_name}.`, () =>
-                      api.checkout({
-                        product_id: e.product_id as string,
-                        product_name: e.product_name as string,
-                        track_id: e.track_id as number,
-                        session_id: e.session_id,
-                        hand_id: e.hand_id,
-                      }),
-                    )
-                  }
+            {(pending?.pending ?? []).map((e: PendingRow) => {
+              const inBasket = e.reason === "in_basket";
+              return (
+                <div
+                  key={e.event_uid}
+                  className={`rounded-lg border p-2.5 ${
+                    inBasket
+                      ? "border-state-basket/25 bg-state-basket/5"
+                      : "border-state-hand/25 bg-state-hand/5"
+                  }`}
                 >
-                  Confirm checkout
-                </button>
-              </div>
-            ))}
-            {!basket?.pending.length && (
-              <Empty text="Nothing in the basket is waiting for confirmation." />
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="truncate text-xs font-medium text-slate-100">
+                      {e.product_name}
+                    </span>
+                    <span
+                      className={`chip ${
+                        inBasket
+                          ? "border-state-basket/40 bg-state-basket/10 text-state-basket"
+                          : "border-state-hand/40 bg-state-hand/10 text-state-hand"
+                      }`}
+                    >
+                      {e.live_state ?? (inBasket ? "IN_BASKET" : "IN_HAND")}
+                    </span>
+                  </div>
+                  <div className="mt-1 font-mono text-[10px] text-slate-500">
+                    picked up {stamp(e.ts)}
+                    {e.hand_id != null ? ` · hand ${e.hand_id}` : ""} · track #{e.track_id}
+                  </div>
+                  <div className="mt-2 flex gap-1.5">
+                    <button
+                      className="btn btn-primary flex-1 justify-center"
+                      onClick={() =>
+                        act(`Checked out ${e.product_name}.`, () =>
+                          api.checkout({
+                            product_id: e.product_id as string,
+                            product_name: e.product_name as string,
+                            track_id: e.track_id as number,
+                            session_id: e.session_id,
+                            hand_id: e.hand_id,
+                          }),
+                        )
+                      }
+                    >
+                      Confirm checkout
+                    </button>
+                    <button
+                      className="btn flex-1 justify-center"
+                      onClick={() =>
+                        act(`${e.product_name} marked as returned.`, () =>
+                          api.resolveEvent(
+                            e.event_uid,
+                            inBasket ? "removed from basket" : "put back by owner",
+                          ),
+                        )
+                      }
+                    >
+                      Put back
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+            {!pending?.pending.length && (
+              <Empty text="Nothing is waiting for confirmation." />
             )}
           </div>
         </section>

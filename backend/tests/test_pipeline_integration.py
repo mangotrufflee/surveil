@@ -192,7 +192,9 @@ def test_snapshot_and_overlay_are_produced(tmp_path: Path):
     assert snap["products"][0]["track_id"] == 1
     assert snap["states"]["1"]["state"] == "ON_SHELF"
     assert snap["states"]["1"]["anchor_confirmed"] is True
-    assert snap["basket_source"] == "none"
+    # stock COCO has no basket class, so the drawn fallback region is used
+    assert snap["basket_source"] == "roi"
+    assert snap["basket_zone"] is not None
 
     jpeg = pipeline.frame_jpeg()
     assert jpeg is not None and jpeg[:2] == b"\xff\xd8"  # JPEG SOI marker
