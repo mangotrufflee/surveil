@@ -12,14 +12,18 @@ import cv2
 import numpy as np
 
 from . import overlay
+from .appearance import describe
+from .baskets import BasketTracker
 from .camera import CameraSource
 from .config import Settings
-from .detection import FrameDetections, ProductDetector, resolve_basket_zone
+from .detection import FrameDetections, ProductDetector
+from .geometry import BBox, clamp
 from .hand_tracking import HandIdentityTracker
 from .hands import AVAILABLE_HAND_BACKENDS, HandBox, build_hand_detector
 from .interaction import EventType, InteractionEngine, ProductState
 from .ledger import Ledger
-from .tracking import ByteTracker
+from .registry import ProductRegistry
+from .tracking import ByteTracker, Detection
 
 HAND_BACKEND_HELP = {
     "auto": "use the converted handtracking model if present, else mediapipe",
@@ -90,6 +94,7 @@ class Pipeline:
         self._events: list[dict[str, Any]] = []
         self._frame_lock = threading.Lock()
         self._last_hand_seen: float | None = None
+        self._reassociations: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------ status
     @property
@@ -156,6 +161,11 @@ class Pipeline:
         )
         self.engine = InteractionEngine(settings.thresholds, session_id)
         self.hand_tracker = HandIdentityTracker(session_id)
+        self.registry = ProductRegistry(
+            session_id,
+            identity_hold_seconds=settings.identity_hold_seconds,
+        )
+        self.baskets = BasketTracker(max_age=settings.thresholds.max_missed_frames)
         # must reset, otherwise the new session's throughput is computed against
         # the previous session's frame count and readiness checks pass instantly
         self.status.processed_frames = 0
@@ -234,6 +244,20 @@ class Pipeline:
             self._last_hand_seen = ts
             return False
         return (ts - self._last_hand_seen) >= grace
+
+    def _roi_zone(self, image: np.ndarray) -> BBox | None:
+        """The drawn basket region in pixel coordinates, if one is set."""
+        roi = self.settings.basket_roi
+        if not roi:
+            return None
+        h, w = image.shape[:2]
+        x, y, rw, rh = roi
+        return BBox(
+            clamp(x * w, 0, w),
+            clamp(y * h, 0, h),
+            clamp((x + rw) * w, 0, w),
+            clamp((y + rh) * h, 0, h),
+        )
 
     def _basket_mode(self) -> str:
         """Whether the basket zone comes from a model class or a drawn region."""
@@ -316,8 +340,10 @@ class Pipeline:
         assert self.engine is not None and self.hand_tracker is not None
 
         det: FrameDetections = self.detector.detect(image, self.tracker)
-        basket_zone = resolve_basket_zone(
-            det.baskets, self.settings.basket_roi, image.shape[1], image.shape[0]
+
+        # ---- basket identity (its own track, its own id) -----------------
+        basket_zone, basket_track_id, basket_source = self.baskets.update(
+            det.baskets, self._roi_zone(image), ts
         )
 
         # ---- hands ------------------------------------------------------
@@ -332,12 +358,41 @@ class Pipeline:
             raw_hands = []
         tracked_hands = self.hand_tracker.update(raw_hands, ts)
 
-        # ---- interaction engine ----------------------------------------
-        engine_input = [
-            (t.track_id, f"{t.class_name}:{t.track_id}", t.class_name, t.bbox, t.score)
-            for t in det.tracks
-            if not t.predicted
-        ]
+        # ---- stable product identity ------------------------------------
+        # ByteTrack ids are temporary. Map each one onto a product_id that
+        # survives the track dying, so a re-detection of the same physical
+        # object does not become a new product in the ledger.
+        frame_size = (image.shape[1], image.shape[0])
+        engine_input = []
+        for t in det.tracks:
+            if t.predicted:
+                continue
+            descriptor = describe(image, t.bbox.to_xyxy())
+            match = self.registry.resolve(
+                track_id=t.track_id,
+                class_name=t.class_name,
+                box=t.bbox,
+                descriptor=descriptor,
+                ts=ts,
+                frame_size=frame_size,
+            )
+            if match.evidence == "reassociated":
+                self._reassociations.append(
+                    {
+                        "ts": ts,
+                        "product_id": match.product_id,
+                        "from_track": match.matched_previous_track,
+                        "to_track": t.track_id,
+                        "score": round(match.score, 3),
+                        **match.detail,
+                    }
+                )
+                if len(self._reassociations) > 50:
+                    self._reassociations = self._reassociations[-50:]
+            engine_input.append(
+                (t.track_id, match.product_id, t.class_name, t.bbox, t.score)
+            )
+
         hand_input = [(h.hand_id, HandBox(h.box, h.score)) for h in tracked_hands]
         new_events = self.engine.update(
             frame=frame_index,
@@ -345,7 +400,24 @@ class Pipeline:
             products=engine_input,
             hands=hand_input,
             basket_zone=basket_zone,
+            basket_track_id=basket_track_id,
         )
+
+        # ---- keep the registry's view of state in step -------------------
+        for snap_row in self.engine.snapshot(ts):
+            self.registry.note_state(
+                snap_row["product_id"],
+                ProductState(snap_row["state"]),
+                BBox(*snap_row["box"]) if snap_row["box"] else None,
+                snap_row["hand_id"],
+            )
+        for track in self.engine.finished:
+            self.registry.mark_lost(
+                track.product_id, track.box, track.state, ts
+            )
+        for ev in new_events:
+            if ev.type is EventType.PLACED_IN_BASKET:
+                self.baskets.add_contents(ev.basket_track_id, ev.product_id)
 
         # ---- ledger ------------------------------------------------------
         if new_events:
@@ -403,12 +475,15 @@ class Pipeline:
             ],
             "hands": self.hand_tracker.snapshot(),
             "basket_zone": basket_zone.as_list() if basket_zone else None,
-            "basket_source": "yolo" if det.baskets else (
-                "roi" if basket_zone else "none"
-            ),
+            "basket_track_id": basket_track_id,
+            "basket_source": basket_source,
+            "basket_source_detail": "yolo" if det.baskets else ("roi" if basket_zone else "none"),
             "ignored_count": len(det.ignored),
             "ignored_classes": list(self.settings.ignored_classes),
             "hands_blind": self._hands_blind(ts, len(tracked_hands)),
+            "products_registry": self.registry.snapshot() if self.registry else [],
+            "baskets": self.baskets.snapshot() if self.baskets else [],
+            "reassociations": self._reassociations[-12:],
             "states": {str(s["track_id"]): s for s in states},
             "hud": {
                 "fps": round(self.status.fps, 2),
@@ -440,6 +515,7 @@ class Pipeline:
             snapshot["hud"],
             ignored_count=len(det.ignored),
             events_recent=self._events[-4:],
+            basket_track_id=basket_track_id,
         )
         ok, buf = cv2.imencode(
             ".jpg", rendered, [int(cv2.IMWRITE_JPEG_QUALITY), self.settings.stream_jpeg_quality]

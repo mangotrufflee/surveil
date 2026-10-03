@@ -191,5 +191,129 @@ def test_live_snapshot_exposes_the_people_handling(client: TestClient):
     assert isinstance(live["hud"]["hand_backend"], str)
 
 
+def test_products_endpoint_separates_identity_from_track(client: TestClient):
+    play(client.pipeline, len(pickup_story()))  # type: ignore[attr-defined]
+    body = client.get("/api/products").json()
+
+    ids = [p["product_id"] for p in body["identities"]]
+    assert ids, "expected at least one product identity"
+    for pid in ids:
+        assert "#" in pid, f"identity must be session-scoped, got {pid}"
+        assert not pid.split("#")[1].isdigit() or ":" not in pid
+
+    for rec in body["identities"]:
+        assert "current_track_id" in rec
+        assert isinstance(rec["track_ids"], list)
+
+
+def test_baskets_endpoint(client: TestClient):
+    play(client.pipeline, len(pickup_story()))  # type: ignore[attr-defined]
+    baskets = client.get("/api/baskets").json()["baskets"]
+    assert len(baskets) == 1
+    assert "contents" in baskets[0]
+    assert baskets[0]["active"] is True
+
+
+def test_checkout_settles_only_the_clicked_interaction(make_client):
+    """'Mark as bought' must confirm one interaction, not everything.
+
+    Two separate pickups of the *same* product (put back in between). ByteTrack
+    ids change along the way; the product_id must not.
+    """
+
+    def lerp(a: list[int], b: list[int], i: int, n: int) -> list[int]:
+        t = i / n
+        return [round(a[j] + (b[j] - a[j]) * t, 1) for j in range(4)]
+
+    shelf = [300, 200, 380, 320]
+    away = [700, 200, 780, 320]
+    person = [600, 100, 900, 700]
+    carry = 20
+    steps: list[dict[str, Any]] = []
+
+    def still(n: int, box: list[int], hands=False):
+        for _ in range(n):
+            step = {"bottles": [box], "person": person}
+            if hands:
+                step["hands"] = [[box[0] - 10, box[1] - 10, box[2] + 10, box[3] + 10]]
+            steps.append(step)
+
+    def carry_to(end: list[int], start: list[int]):
+        for i in range(1, carry + 1):
+            b = lerp(start, end, i, carry)
+            steps.append(
+                {
+                    "bottles": [b],
+                    "hands": [[b[0] - 10, b[1] - 10, b[2] + 10, b[3] + 10]],
+                    "person": person,
+                }
+            )
+
+    still(18, shelf)              # settle
+    still(2, shelf, hands=True)   # reach in
+    carry_to(away, shelf)         # first pickup
+    still(8, away)                # hold away, no hand -> still IN_HAND
+    carry_to(shelf, away)         # return to the shelf
+    still(8, shelf)               # no hand, on the anchor -> PUT_BACK
+    still(2, shelf, hands=True)   # reach in again
+    carry_to(away, shelf)         # second pickup
+
+    with make_client(steps) as c:
+        play(c.pipeline, len(steps))  # type: ignore[attr-defined]
+        picked = c.get("/api/events", params={"type": "PICKED_UP"}).json()["events"]
+        assert len(picked) == 2, f"expected 2 pickups, got {len(picked)}"
+        pids = {e["product_id"] for e in picked}
+        assert len(pids) == 1, "both pickups belong to the same product identity"
+
+        latest = max(picked, key=lambda e: e["ts"])
+        res = c.post(
+            "/api/checkout",
+            json={
+                "product_id": latest["product_id"],
+                "product_name": latest["product_name"],
+                "track_id": latest["product_track_id"],
+                "session_id": latest["session_id"],
+                "event_uid": latest["event_uid"],
+            },
+        )
+        assert res.status_code == 200
+
+        still_open = [
+            e
+            for e in c.get("/api/events", params={"type": "PICKED_UP"}).json()["events"]
+            if e["resolved"] == 0
+        ]
+        assert any(e["event_uid"] != latest["event_uid"] for e in still_open), (
+            "checking out the latest interaction must not close the earlier one"
+        )
+
+
+def test_events_expose_the_product_basket_relationship(client: TestClient):
+    play(client.pipeline, len(pickup_story()))  # type: ignore[attr-defined]
+    rows = client.get("/api/events").json()["events"]
+    placed = [e for e in rows if e["type"] == "PLACED_IN_BASKET"]
+    assert placed
+    assert placed[0]["basket_track_id"] is not None
+    assert placed[0]["product_track_id"] == placed[0]["track_id"]
+    assert placed[0]["inferred"] in (0, 1)
+    assert not placed[0]["product_id"].endswith(f":{placed[0]['track_id']}")
+
+
+def test_csv_export_includes_identity_columns(client: TestClient):
+    play(client.pipeline, len(pickup_story()))  # type: ignore[attr-defined]
+    header = client.get("/api/ledger/export.csv").text.splitlines()[0]
+    for col in ("product_id", "product_track_id", "basket_track_id", "inferred"):
+        assert col in header, f"{col} missing from the export"
+
+
+def test_live_snapshot_exposes_registry_and_baskets(client: TestClient):
+    play(client.pipeline, len(pickup_story()))  # type: ignore[attr-defined]
+    live = client.get("/api/live").json()
+    assert "products_registry" in live and live["products_registry"]
+    assert "baskets" in live
+    assert "basket_track_id" in live
+    assert "reassociations" in live
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

@@ -58,6 +58,7 @@ def render(
     hud: dict[str, Any],
     ignored_count: int = 0,
     events_recent: list[dict[str, Any]] | None = None,
+    basket_track_id: int | None = None,
 ) -> np.ndarray:
     img = frame.copy()
     height, width = img.shape[:2]
@@ -72,7 +73,10 @@ def render(
     if basket_zone is not None:
         box = basket_zone.as_int().to_xyxy()
         cv2.rectangle(img, (box[0], box[1]), (box[2], box[3]), BASKET_COLOR, 2)
-        _text(img, "BASKET ZONE", (box[0] + 6, max(14, box[1] - 8)), 0.45, BASKET_COLOR, 1)
+        tag = "BASKET ZONE"
+        if basket_track_id is not None:
+            tag = f"BASKET #{basket_track_id}"
+        _text(img, tag, (box[0] + 6, max(14, box[1] - 8)), 0.45, BASKET_COLOR, 1)
 
     # ---- hands (drawn, but never as products) --------------------------
     for hand in hands:
@@ -99,8 +103,11 @@ def render(
             cv2.circle(img, (int(ax), int(ay)), 3, ANCHOR_COLOR, -1)
 
         name = track["product_name"][:18]
-        head = f"{name} #{track['track_id']} {state}"
-        _text(img, head, (x1, max(14, y1 - 22)), 0.48, color, 1)
+        # show the stable identity alongside the temporary track id
+        pid = track.get("product_id") or ""
+        head = f"{name} {pid} tr#{track['track_id']}"
+        _text(img, head, (x1, max(14, y1 - 22)), 0.46, color, 1)
+        _text(img, state, (x1, max(14, y1 - 8)), 0.42, color, 1)
         detail: list[str] = []
         if not track.get("anchor_confirmed"):
             detail.append(f"settling {track.get('settle_frames', 0)}")
@@ -111,7 +118,7 @@ def render(
         if detail:
             detail_y = y2 + 16
             if detail_y > label_floor:
-                detail_y = max(14, y1 - 40)  # no room below: put it above the box
+                detail_y = max(26, y1 - 52)  # no room below: put it above the box
             _text(img, " | ".join(detail), (x1, detail_y), 0.42, color, 1)
 
     # ---- event ticker --------------------------------------------------

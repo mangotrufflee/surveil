@@ -93,12 +93,20 @@ class ThresholdUpdate(BaseModel):
 
 
 class CheckoutRequest(BaseModel):
-    product_id: str
+    product_id: str = Field(
+        ..., description="Stable product identity, e.g. 'bottle#1' - not the ByteTrack id."
+    )
     product_name: str
     track_id: int
     session_id: str | None = None
     hand_id: int | None = None
     note: str = "confirmed by owner"
+    event_uid: str | None = Field(
+        None,
+        description="The exact pending event being settled. Lets the owner confirm one "
+        "specific interaction instead of everything for the product.",
+    )
+    basket_track_id: int | None = None
 
 
 class HandBackendRequest(BaseModel):
@@ -331,7 +339,23 @@ def stats() -> dict[str, Any]:
 
 @app.get("/api/products")
 def products() -> dict[str, Any]:
-    return {"products": ledger.product_catalog()}
+    """Detected products, with their stable identity separated from track ids.
+
+    `current_track_id` is the ByteTrack id right now (temporary); `product_id` is
+    the session identity that survives the track dying. `track_ids` lists every
+    track the object has been seen under.
+    """
+    return {
+        "products": ledger.product_catalog(),
+        "identities": pipeline.registry.snapshot() if pipeline.registry else [],
+        "reassociations": pipeline._reassociations[-12:],
+    }
+
+
+@app.get("/api/baskets")
+def baskets() -> dict[str, Any]:
+    """Tracked baskets and which product identities are in each of them."""
+    return {"baskets": pipeline.baskets.snapshot() if pipeline.baskets else []}
 
 
 @app.get("/api/sessions")
@@ -401,6 +425,8 @@ def checkout(body: CheckoutRequest) -> dict[str, Any]:
         session_id=body.session_id,
         hand_id=body.hand_id,
         note=body.note,
+        event_uid=body.event_uid,
+        basket_track_id=body.basket_track_id,
     )
     return {"ok": True, "purchase": record}
 

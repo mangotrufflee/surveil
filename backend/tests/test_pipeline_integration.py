@@ -136,6 +136,10 @@ def shelf_story(frames: int = 20) -> list[dict[str, Any]]:
     return [shelf_step() for _ in range(frames)]
 
 
+def shelf_step_with(box: list[int]) -> dict[str, Any]:
+    return {"bottles": [box], "person": [600, 100, 900, 700]}
+
+
 def pickup_story() -> list[dict[str, Any]]:
     """Shelf -> hand reaches in -> gradual carry to the basket -> hand releases.
 
@@ -233,7 +237,12 @@ def test_checkout_clears_the_pending_basket(tmp_path: Path):
     pending = ledger.basket_holds()
     assert len(pending) == 1
 
-    ledger.checkout("bottle:1", "bottle", pending[0]["track_id"], "S-integration")
+    # product_id is now a stable session identity (e.g. "bottle#1"), not derived
+    # from the ByteTrack id
+    pid = pending[0]["product_id"]
+    assert not pid.endswith(":1"), f"product_id must not be track-scoped, got {pid}"
+
+    ledger.checkout(pid, pending[0]["product_name"], pending[0]["track_id"], "S-integration")
     assert ledger.basket_holds() == []
     assert len(ledger.purchased()) == 1
     assert ledger.stats().checked_out == 1
@@ -266,6 +275,80 @@ def test_multiple_products_keep_separate_ledgers(tmp_path: Path):
     assert {p["track_id"] for p in snap["products"]} == {1, 2}
     assert {s["product_name"] for s in snap["states"].values()} == {"bottle"}
     ledger.close()
+
+
+def test_track_churn_does_not_create_new_products(tmp_path: Path):
+    """The bug from the ledger: one phone became #3, #4, #5, #6, #7, #8, #9.
+
+    ByteTrack must keep re-minting ids when a detection drops out for longer
+    than max_missed_frames, but the *product* must stay one product_id - and the
+    ledger must not fill with TRACK_LOST noise for the same object.
+    """
+    max_missed = ThresholdSettings().max_missed_frames
+    box = [300, 200, 380, 320]
+    gone = {"person": [600, 100, 900, 700]}
+
+    # visible -> hidden long enough to lose the track -> visible again, slightly moved
+    story = (
+        [shelf_step_with(box)]
+        + [gone] * (max_missed + 5)
+        + [shelf_step_with([315, 205, 395, 325])] * 10
+    )
+    pipeline, ledger = build(tmp_path, story)
+    play(pipeline, len(story))
+
+    snap = pipeline.snapshot()
+    identities = snap["products_registry"]
+    assert len(identities) == 1, f"expected 1 product, got {[i['product_id'] for i in identities]}"
+    ident = identities[0]
+    assert len(ident["track_ids"]) >= 2, "the track should have been re-minted"
+    assert ident["reassociations"] >= 1
+    assert snap["reassociations"], "the re-association should be reported"
+
+    # the ledger must not have minted a second product
+    products = {e["product_id"] for e in ledger.query_events()}
+    assert len(products) <= 1, f"ledger churned: {products}"
+
+
+def test_basket_identity_is_stable_and_records_contents(tmp_path: Path):
+    pipeline, ledger = build(tmp_path, pickup_story())
+    play(pipeline, len(pickup_story()))
+
+    baskets = pipeline.snapshot()["baskets"]
+    assert len(baskets) == 1, "exactly one basket identity, not a per-frame one"
+    ident = baskets[0]
+    assert ident["active"] is True
+    # the story detects a basket class during the carry, which supersedes the
+    # drawn fallback region rather than adding a second identity
+    assert ident["source"] == "yolo"
+
+    placed = [e for e in ledger.query_events() if e["type"] == "PLACED_IN_BASKET"]
+    assert placed, "expected a PLACED_IN_BASKET event"
+    assert placed[0]["basket_track_id"] == ident["basket_track_id"]
+    # the product_id is stable, and recorded as basket contents
+    assert ident["contents"] == [placed[0]["product_id"]]
+    assert not placed[0]["product_id"].endswith(":1")
+
+
+def test_drawn_basket_region_is_used_when_no_basket_class(tmp_path: Path):
+    pipeline, ledger = build(tmp_path, shelf_story(20))
+    play(pipeline, 20)
+    baskets = pipeline.snapshot()["baskets"]
+    assert len(baskets) == 1
+    assert baskets[0]["source"] == "roi"
+    assert baskets[0]["basket_track_id"] >= 100000  # separate id range
+    assert pipeline.snapshot()["basket_track_id"] == baskets[0]["basket_track_id"]
+
+
+def test_events_record_the_product_basket_relationship(tmp_path: Path):
+    pipeline, ledger = build(tmp_path, pickup_story())
+    play(pipeline, len(pickup_story()))
+    for ev in ledger.query_events():
+        # identity is never track-scoped
+        assert not (ev["product_id"] or "").endswith(f":{ev['track_id']}")
+        if ev["type"] == "PLACED_IN_BASKET":
+            assert ev["basket_track_id"] is not None
+            assert ev["product_track_id"] == ev["track_id"]
 
 
 if __name__ == "__main__":

@@ -63,6 +63,9 @@ class InteractionEvent:
     hand_id: int | None = None
     session_id: str | None = None
     dwell_ms: int = 0
+    basket_track_id: int | None = None
+    inferred: bool = False
+    reassociated_from: int | None = None
     meta: dict[str, Any] = field(default_factory=dict)
 
 
@@ -99,6 +102,14 @@ class ProductTrack:
     basket_overlap: float = 0.0
     on_shelf_since: float = 0.0
     picked_up_at: float | None = None
+
+    # basket relationship + occlusion handling
+    basket_track_id: int | None = None
+    ever_overlapped_basket: bool = False
+    last_basket_overlap_ts: float | None = None
+    last_basket_track_id: int | None = None
+    reassociated_from: int | None = None
+    inferred_basket_entry: bool = False
 
     def set_state(self, state: ProductState, ts: float) -> None:
         if state is self.state:
@@ -146,6 +157,7 @@ class InteractionEngine:
         products: list[tuple[int, str, str, BBox, float]],
         hands: list[tuple[int, HandBox]],
         basket_zone: BBox | None,
+        basket_track_id: int | None = None,
     ) -> list[InteractionEvent]:
         events: list[InteractionEvent] = []
 
@@ -154,16 +166,31 @@ class InteractionEngine:
             seen.add(track_id)
             track = self.tracks.get(track_id)
             if track is None:
-                track = ProductTrack(
-                    track_id=track_id,
-                    product_id=product_id,
-                    product_name=product_name,
-                    first_seen=ts,
-                    state_since=ts,
-                    on_shelf_since=ts,
-                )
-                track.anchor = box
-                self.tracks[track_id] = track
+                revived = self._revive(product_id)
+                if revived is not None:
+                    # same physical product, new ByteTrack id after a long
+                    # occlusion - carry the state over instead of starting fresh
+                    revived.track_id = track_id
+                    revived.box = box
+                    revived.prev_box = box
+                    revived.missed_frames = 0
+                    revived.score = score
+                    revived.last_seen = ts
+                    self.tracks[track_id] = revived
+                    self.finished = [t for t in self.finished if t.product_id != product_id]
+                    events.extend(self._resumed(revived, ts))
+                    track = revived
+                else:
+                    track = ProductTrack(
+                        track_id=track_id,
+                        product_id=product_id,
+                        product_name=product_name,
+                        first_seen=ts,
+                        state_since=ts,
+                        on_shelf_since=ts,
+                    )
+                    track.anchor = box
+                    self.tracks[track_id] = track
 
             track.prev_box = track.box
             track.box = box
@@ -177,6 +204,11 @@ class InteractionEngine:
                 track.hand_id = hand_id
                 track.session_id = self.session_id
             track.basket_overlap = self._in_basket(box, basket_zone)
+            track.basket_track_id = basket_track_id
+            if track.basket_overlap > 0.0:
+                track.ever_overlapped_basket = True
+                track.last_basket_overlap_ts = ts
+                track.last_basket_track_id = basket_track_id
             track.displacement_px = (
                 center_distance(box, track.anchor) if track.anchor is not None else 0.0
             )
@@ -194,6 +226,19 @@ class InteractionEngine:
                 events.extend(self._expire(track, ts))
 
         return events
+
+    # ------------------------------------------------------------- re-identity
+    def _revive(self, product_id: str) -> ProductTrack | None:
+        """Recover the state of a recently-lost product with the same identity."""
+        for track in self.finished:
+            if track.product_id == product_id:
+                return track
+        return None
+
+    def _resumed(self, track: ProductTrack, ts: float) -> list[InteractionEvent]:
+        """Emit nothing, but leave a breadcrumb that the identity was resumed."""
+        track.state_since = ts
+        return []
 
     # ------------------------------------------------------------- transitions
     def _transition(self, track: ProductTrack, ts: float) -> list[InteractionEvent]:
@@ -299,8 +344,43 @@ class InteractionEngine:
 
     def _expire(self, track: ProductTrack, ts: float) -> list[InteractionEvent]:
         out: list[InteractionEvent] = []
+        prior_state = track.state
+
+        # A product that was IN_HAND and had just been overlapping the basket is
+        # very likely inside it now, hidden by its own contents or the basket rim.
+        # The disappearance is NOT the proof - the history is. Record the event
+        # as inferred so the owner can tell the two apart.
+        if (
+            not track.inferred_basket_entry
+            and prior_state is ProductState.IN_HAND
+            and track.ever_overlapped_basket
+            and self.t.infer_basket_on_occlusion
+        ):
+            track.set_state(ProductState.IN_BASKET, ts)
+            track.inferred_basket_entry = True
+            out.append(
+                self._event(
+                    track,
+                    ts,
+                    EventType.PLACED_IN_BASKET,
+                    state_from="IN_HAND",
+                    inferred=True,
+                    occluded=True,
+                    evidence="was IN_HAND and overlapping the basket before being occluded",
+                )
+            )
+
         track.set_state(ProductState.LOST, ts)
-        if self.t.lost_emit_event and self.t.mark_lost_state:
+        # The product record survives in `finished` so the registry can
+        # re-associate a later detection onto the same product_id.
+        #
+        # If the product's final resting place was the basket it is NOT lost -
+        # it is exactly where the owner expects it - so no TRACK_LOST is
+        # emitted. Otherwise the track genuinely vanished.
+        resting_in_basket = track.inferred_basket_entry or prior_state is ProductState.IN_BASKET
+        if resting_in_basket:
+            track.set_state(ProductState.IN_BASKET, ts)
+        elif self.t.lost_emit_event and self.t.mark_lost_state:
             out.append(self._event(track, ts, EventType.TRACK_LOST, missed=track.missed_frames))
         self.tracks.pop(track.track_id, None)
         self.finished.append(track)
@@ -339,6 +419,8 @@ class InteractionEngine:
             hand_id=track.hand_id,
             session_id=track.session_id or self.session_id,
             dwell_ms=dwell,
+            basket_track_id=track.last_basket_track_id or track.basket_track_id,
+            inferred=bool(meta.get("inferred", False)),
             meta=payload,
         )
 

@@ -160,40 +160,69 @@ export default function OwnerDashboard() {
                     </span>
                   </div>
                   <div className="mt-1 font-mono text-[10px] text-slate-500">
-                    picked up {stamp(e.ts)}
-                    {e.hand_id != null ? ` · hand ${e.hand_id}` : ""} · track #{e.track_id}
-                  </div>
-                  <div className="mt-2 flex gap-1.5">
-                    <button
-                      className="btn btn-primary flex-1 justify-center"
-                      onClick={() =>
-                        act(`Checked out ${e.product_name}.`, () =>
-                          api.checkout({
-                            product_id: e.product_id as string,
-                            product_name: e.product_name as string,
-                            track_id: e.track_id as number,
-                            session_id: e.session_id,
-                            hand_id: e.hand_id,
-                          }),
-                        )
-                      }
+                  picked up {stamp(e.ts)}
+                  {e.hand_id != null ? ` · hand ${e.hand_id}` : ""}
+                </div>
+                <div className="mt-0.5 flex flex-wrap gap-1.5">
+                  <span
+                    className="chip border-ink-600 bg-ink-800 text-slate-400"
+                    title="Stable identity - survives the track id changing"
+                  >
+                    {e.product_id}
+                  </span>
+                  <span
+                    className="chip border-ink-600 bg-ink-800 text-slate-500"
+                    title="ByteTrack id at the time of this event (temporary)"
+                  >
+                    track #{e.product_track_id ?? e.track_id}
+                  </span>
+                  {e.basket_track_id != null && (
+                    <span className="chip border-state-basket/40 bg-state-basket/10 text-state-basket">
+                      basket #{e.basket_track_id}
+                    </span>
+                  )}
+                  {e.inferred === 1 && (
+                    <span
+                      className="chip border-amber-500/40 bg-amber-500/10 text-amber-300"
+                      title="Inferred from interaction history, not directly observed"
                     >
-                      Confirm checkout
-                    </button>
-                    <button
-                      className="btn flex-1 justify-center"
-                      onClick={() =>
-                        act(`${e.product_name} marked as returned.`, () =>
-                          api.resolveEvent(
-                            e.event_uid,
-                            inBasket ? "removed from basket" : "put back by owner",
-                          ),
-                        )
-                      }
-                    >
-                      Put back
-                    </button>
-                  </div>
+                      inferred
+                    </span>
+                  )}
+                </div>
+                <div className="mt-2 flex gap-1.5">
+                  <button
+                    className="btn btn-primary flex-1 justify-center"
+                    onClick={() =>
+                      act(`Checked out ${e.product_name}.`, () =>
+                        api.checkout({
+                          product_id: e.product_id as string,
+                          product_name: e.product_name as string,
+                          track_id: e.product_track_id ?? (e.track_id as number),
+                          session_id: e.session_id,
+                          hand_id: e.hand_id,
+                          event_uid: e.event_uid,
+                          basket_track_id: e.basket_track_id,
+                        }),
+                      )
+                    }
+                  >
+                    Mark as bought
+                  </button>
+                  <button
+                    className="btn flex-1 justify-center"
+                    onClick={() =>
+                      act(`${e.product_name} marked as returned.`, () =>
+                        api.resolveEvent(
+                          e.event_uid,
+                          inBasket ? "removed from basket" : "put back by owner",
+                        ),
+                      )
+                    }
+                  >
+                    Put back
+                  </button>
+                </div>
                 </div>
               );
             })}
@@ -274,6 +303,94 @@ export default function OwnerDashboard() {
         </section>
       </div>
 
+      {/* ---------------------------------------------- product identities */}
+      <section className="panel">
+        <div className="panel-head">
+          <span className="panel-title">Product identity vs tracking identity</span>
+          <span className="font-mono text-[10px] text-slate-500">
+            {products?.identities.length ?? 0} products /{" "}
+            {products?.reassociations.length ?? 0} re-associations
+          </span>
+        </div>
+        <div className="grid grid-cols-1 gap-4 p-3 lg:grid-cols-2">
+          <div className="overflow-x-auto">
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-ink-700">
+                  <th className="th">product_id (stable)</th>
+                  <th className="th">state</th>
+                  <th className="th">current track</th>
+                  <th className="th">track ids seen</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(products?.identities ?? []).map((p) => (
+                  <tr key={p.product_id} className="border-b border-ink-800/60">
+                    <td className="td text-slate-200">
+                      {p.product_id}
+                      {p.reassociations > 0 && (
+                        <span
+                          className="ml-1.5 text-[9px] text-emerald-400"
+                          title="This product was re-identified after its track died"
+                        >
+                          re-identified x{p.reassociations}
+                        </span>
+                      )}
+                    </td>
+                    <td className="td">{p.state}</td>
+                    <td className="td text-slate-500">
+                      {p.current_track_id != null ? `#${p.current_track_id}` : "-"}
+                    </td>
+                    <td className="td text-slate-600">
+                      {p.track_ids.map((t) => `#${t}`).join(" ")}
+                    </td>
+                  </tr>
+                ))}
+                {!products?.identities.length && (
+                  <EmptyRow cols={4} text="No products tracked in this session yet." />
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="overflow-x-auto">
+            <div className="px-3 pb-1 text-[10px] uppercase tracking-wider text-slate-500">
+              Recent re-identifications
+            </div>
+            <table className="w-full">
+              <thead>
+                <tr className="border-b border-ink-700">
+                  <th className="th">product</th>
+                  <th className="th">track</th>
+                  <th className="th">history</th>
+                  <th className="th">spatial</th>
+                  <th className="th">look</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(products?.reassociations ?? []).map((r, i) => (
+                  <tr key={`${r.ts}-${i}`} className="border-b border-ink-800/60">
+                    <td className="td">{r.product_id}</td>
+                    <td className="td text-slate-500">
+                      #{r.from_track} &rarr; #{r.to_track}
+                    </td>
+                    <td className="td">{r.history ?? "-"}</td>
+                    <td className="td">{r.spatial ?? "-"}</td>
+                    <td className="td">{r.appearance ?? "-"}</td>
+                  </tr>
+                ))}
+                {!products?.reassociations.length && (
+                  <EmptyRow
+                    cols={5}
+                    text="No track has had to be re-identified yet."
+                  />
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       {/* -------------------------------------------------------- ledger table */}
       <section className="panel">
         <div className="panel-head">
@@ -302,7 +419,9 @@ export default function OwnerDashboard() {
                 <th className="th">Time</th>
                 <th className="th">Event</th>
                 <th className="th">Product</th>
+                <th className="th">Identity</th>
                 <th className="th">Track</th>
+                <th className="th">Basket</th>
                 <th className="th">Hand</th>
                 <th className="th">State</th>
                 <th className="th">Displacement</th>
@@ -319,7 +438,25 @@ export default function OwnerDashboard() {
                     <EventBadge type={e.type} />
                   </td>
                   <td className="td">{e.product_name}</td>
-                  <td className="td text-slate-500">#{e.track_id}</td>
+                  <td className="td text-slate-400">{e.product_id}</td>
+                  <td className="td text-slate-500">
+                    #{e.product_track_id ?? e.track_id}
+                  </td>
+                  <td className="td">
+                    {e.basket_track_id != null ? (
+                      <span className="text-state-basket">#{e.basket_track_id}</span>
+                    ) : (
+                      <span className="text-slate-700">-</span>
+                    )}
+                    {e.inferred === 1 && (
+                      <span
+                        className="ml-1 text-[9px] text-amber-400"
+                        title="Inferred from interaction history, not directly observed"
+                      >
+                        inf
+                      </span>
+                    )}
+                  </td>
                   <td className="td text-slate-500">{e.hand_id ?? "-"}</td>
                   <td className="td text-slate-500">
                     {e.state_from ? `${e.state_from}->${e.state}` : e.state}
@@ -349,7 +486,7 @@ export default function OwnerDashboard() {
                   </td>
                 </tr>
               ))}
-              {!events?.events.length && <EmptyRow cols={10} text="No events recorded yet." />}
+              {!events?.events.length && <EmptyRow cols={12} text="No events recorded yet." />}
             </tbody>
           </table>
         </div>

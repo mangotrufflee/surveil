@@ -60,7 +60,8 @@ export const api = {
     return get<{ events: LedgerEvent[]; count: number; total: number }>(`/api/events?${q}`);
   },
   stats: () => get<Stats>("/api/stats"),
-  products: () => get<{ products: ProductRow[] }>("/api/products"),
+  products: () => get<ProductsResponse>("/api/products"),
+  baskets: () => get<{ baskets: BasketIdentity[] }>("/api/baskets"),
   alerts: () => get<{ alerts: Alert[]; grace_seconds: number }>("/api/alerts"),
   basket: () => get<{ pending: LedgerEvent[] }>("/api/basket"),
   pending: (sessionId?: string) =>
@@ -75,6 +76,9 @@ export const api = {
     session_id?: string | null;
     hand_id?: number | null;
     note?: string;
+    /** settle exactly this pending event, not the whole product */
+    event_uid?: string | null;
+    basket_track_id?: number | null;
   }) => send<{ ok: boolean; purchase: LedgerEvent }>("/api/checkout", "POST", body),
 
   resolveEvent: (uid: string, resolution: string) =>
@@ -236,10 +240,15 @@ export interface LiveSnapshot {
   products: ProductTrack[];
   hands: HandRow[];
   basket_zone: [number, number, number, number] | null;
+  basket_track_id: number | null;
   basket_source: string;
+  basket_source_detail: string;
   ignored_count: number;
   ignored_classes: string[];
   hands_blind: boolean;
+  products_registry: ProductIdentity[];
+  baskets: BasketIdentity[];
+  reassociations: Reassociation[];
   states: Record<string, TrackState>;
   hud: Record<string, number | string>;
   recent_events: LiveEvent[];
@@ -268,6 +277,55 @@ export interface LedgerEvent {
   resolved: 0 | 1;
   resolution: string | null;
   resolved_by: string | null;
+  /** ByteTrack id at the time of the event (temporary identity) */
+  product_track_id: number | null;
+  /** which tracked basket the product went into */
+  basket_track_id: number | null;
+  /** 1 when the event was inferred from history rather than directly observed */
+  inferred: 0 | 1;
+  reassociated_from: number | null;
+}
+
+/** One physical product, independent of which track is currently seeing it. */
+export interface ProductIdentity {
+  product_id: string;
+  product_name: string;
+  state: ProductState;
+  current_track_id: number | null;
+  track_ids: number[];
+  reassociations: number;
+  hand_id: number | null;
+  first_seen: number;
+  last_seen: number;
+  box: [number, number, number, number] | null;
+}
+
+export interface Reassociation {
+  ts: number;
+  product_id: string;
+  from_track: number | null;
+  to_track: number;
+  score: number;
+  history?: number;
+  spatial?: number;
+  appearance?: number;
+  distance_px?: number | null;
+  lost_state?: string | null;
+}
+
+export interface BasketIdentity {
+  basket_track_id: number;
+  source: string;
+  box: [number, number, number, number];
+  first_seen: number;
+  last_seen: number;
+  contents: string[];
+}
+
+export interface ProductsResponse {
+  products: ProductRow[];
+  identities: ProductIdentity[];
+  reassociations: Reassociation[];
 }
 
 export interface EventQuery {

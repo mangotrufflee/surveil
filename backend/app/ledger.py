@@ -69,6 +69,16 @@ CREATE INDEX IF NOT EXISTS idx_events_product ON events(product_id);
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id);
 """
 
+# Columns added after the first release. Existing databases are migrated in
+# place on open so a ledger written by an earlier build keeps working.
+MIGRATIONS: list[tuple[str, str, str]] = [
+    # (table, column, DDL type)
+    ("events", "product_track_id", "INTEGER"),
+    ("events", "basket_track_id", "INTEGER"),
+    ("events", "inferred", "INTEGER DEFAULT 0"),
+    ("events", "reassociated_from", "INTEGER"),
+]
+
 CSV_COLUMNS = [
     "event_uid",
     "ts_iso",
@@ -90,6 +100,11 @@ CSV_COLUMNS = [
     "resolution",
     "resolved_by",
     "meta",
+    # identity + relationship
+    "product_track_id",
+    "basket_track_id",
+    "inferred",
+    "reassociated_from",
 ]
 
 
@@ -118,7 +133,18 @@ class Ledger:
         self._conn.row_factory = sqlite3.Row
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._migrate()
             self._conn.commit()
+
+    def _migrate(self) -> None:
+        """Add any columns a previous build did not have."""
+        for table, column, ddl in MIGRATIONS:
+            rows = self._conn.execute(f"PRAGMA table_info({table})").fetchall()
+            if not rows:
+                continue
+            if column in {r["name"] for r in rows}:
+                continue
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
     def close(self) -> None:
         with self._lock:
@@ -182,8 +208,9 @@ class Ledger:
                 INSERT INTO events(
                     event_uid, ts, recorded_at, session_id, type, product_id, product_name,
                     track_id, hand_id, confidence, x1, y1, x2, y2, state, state_from,
-                    dwell_ms, meta)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    dwell_ms, meta, product_track_id, basket_track_id, inferred,
+                    reassociated_from)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     uid,
@@ -204,6 +231,10 @@ class Ledger:
                     state_from,
                     event.dwell_ms,
                     meta,
+                    event.track_id,
+                    event.basket_track_id,
+                    1 if event.inferred else 0,
+                    event.reassociated_from,
                 ),
             )
             self._conn.commit()
@@ -342,7 +373,6 @@ class Ledger:
                  AND NOT EXISTS (
                      SELECT 1 FROM events x
                      WHERE x.product_id = e.product_id
-                       AND x.track_id = e.track_id
                        AND x.session_id IS e.session_id
                        AND x.id > e.id
                        AND x.type IN (?, ?, ?, ?)
@@ -351,7 +381,6 @@ class Ledger:
                  AND NOT EXISTS (
                      SELECT 1 FROM events x
                      WHERE x.product_id = e.product_id
-                       AND x.track_id = e.track_id
                        AND x.session_id IS e.session_id
                        AND x.id > e.id
                        AND x.type = ?
@@ -508,8 +537,17 @@ AND NOT EXISTS (
         session_id: str | None,
         hand_id: int | None = None,
         note: str = "confirmed by owner",
+        event_uid: str | None = None,
+        basket_track_id: int | None = None,
     ) -> dict[str, Any]:
-        """Record a CHECKED_OUT event - the owner's reconciliation action."""
+        """Record a CHECKED_OUT event - the owner's reconciliation action.
+
+        This confirms one *specific interaction*, not "whatever is in the basket
+        now". `product_id` is the stable identity and `event_uid` (when the UI
+        passes it) pins the exact event being settled, so checking out a product
+        that was picked up, put back and picked up again does not retroactively
+        close the earlier abandoned interaction.
+        """
         now = time.time()
         uid = uuid.uuid4().hex[:16]
         with self._lock:
@@ -517,8 +555,8 @@ AND NOT EXISTS (
                 """INSERT INTO events(
                        event_uid, ts, recorded_at, session_id, type, product_id, product_name,
                        track_id, hand_id, confidence, state, meta, resolved, resolution,
-                       resolved_at, resolved_by)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       resolved_at, resolved_by, product_track_id, basket_track_id)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     uid,
                     now,
@@ -531,19 +569,45 @@ AND NOT EXISTS (
                     hand_id,
                     1.0,
                     "CHECKED_OUT",
-                    json.dumps({"note": note}),
+                    json.dumps({"note": note, "settles_event": event_uid}),
                     1,
                     note,
                     now,
                     "owner",
+                    track_id,
+                    basket_track_id,
                 ),
             )
-            self._conn.execute(
-                """UPDATE events SET resolved = 1, resolution = 'CHECKED_OUT',
-                   resolved_at = ?, resolved_by = 'owner'
-                   WHERE product_id = ? AND session_id IS ? AND resolved = 0""",
-                (now, product_id, session_id),
-            )
+
+            # Only settle the open interaction: everything from the first still
+            # unresolved pickup of this product onwards (or from the event the
+            # owner clicked onwards).
+            if event_uid:
+                anchor = self._conn.execute(
+                    "SELECT id FROM events WHERE event_uid = ?", (event_uid,)
+                ).fetchone()
+                since_id = anchor["id"] if anchor else None
+            else:
+                anchor = self._conn.execute(
+                    """SELECT MIN(id) AS id FROM events
+                       WHERE product_id = ? AND session_id IS ? AND resolved = 0
+                         AND type IN (?, ?)""",
+                    (
+                        product_id,
+                        session_id,
+                        EventType.PICKED_UP.value,
+                        EventType.PLACED_IN_BASKET.value,
+                    ),
+                ).fetchone()
+                since_id = anchor["id"] if anchor else None
+
+            if since_id is not None:
+                self._conn.execute(
+                    """UPDATE events SET resolved = 1, resolution = 'CHECKED_OUT',
+                       resolved_at = ?, resolved_by = 'owner'
+                       WHERE id >= ? AND resolved = 0 AND session_id IS ?""",
+                    (now, since_id, session_id),
+                )
             self._conn.commit()
         return {
             "event_uid": uid,
@@ -551,6 +615,8 @@ AND NOT EXISTS (
             "product_id": product_id,
             "product_name": product_name,
             "track_id": track_id,
+            "basket_track_id": basket_track_id,
+            "settles_event": event_uid,
             "ts": now,
             "ts_iso": _iso(now),
         }

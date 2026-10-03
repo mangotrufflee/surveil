@@ -35,6 +35,10 @@ class ThresholdSettings(BaseSettings):
     # IN_HAND -> IN_BASKET
     basket_overlap_ratio: float = 0.5
     basket_confirm_frames: int = 4
+    # A product that was IN_HAND and overlapping the basket is recorded as
+    # PLACED_IN_BASKET (flagged inferred) when it becomes occluded, instead of
+    # being reported as a lost track.
+    infer_basket_on_occlusion: bool = True
 
     # TOUCH (RetailAction TOUCH parity, does not move the product)
     touch_emit_frames: int = 2
@@ -90,6 +94,11 @@ class Settings(BaseSettings):
     # stricter, so recovering a partially occluded product needs a clear overlap.
     tracker_match_threshold: float = 0.3
     tracker_second_match_threshold: float = 0.15
+
+    # How long a product identity is held after its track dies, so a later
+    # detection can be re-associated onto the same product_id. Roughly the
+    # window a shopper might occlude an item inside a basket.
+    identity_hold_seconds: float = 45.0
 
     # ---- hand detection (victordibia/handtracking) ----------------------
     # auto | onnx | pose | mediapipe | off
