@@ -38,22 +38,90 @@ unresolved / lost-product situation and brings it to the owner for review.
                               |            ^
         +---------------------+            |
         v                                  |
- +--------------+                 +------------------+
+ +--------------+                   +------------------+
  | Hand detector|  ---- touch ---> |                  |
- | (ONNX)      |                   | Interaction     |
+ | (ONNX/pose)  |                   | Interaction     |
  +--------------+                   | Engine          |
         |                           | (state machine) |
         v                           +------------------+
  +--------------+                            |
- | Hand identity|                           v
- | + customer/s |                  +----------------------+
- | session ids  |                  | Product Interaction |
- +--------------+                  | Ledger (SQLite)     |
-                                   +----------------------+
+ | Hand identity|                   +----------+---------+
+ | + customer/s |                   | Product Registry  | stable product_id,
+ | session ids  |                   | + appearance     | survives track churn
+ +--------------+                   +------------------+
                                             |
                                             v
-                                   Shop Owner Dashboard
+                                   Product Interaction Ledger
 ```
+
+### Identity: `product_id` vs `track_id`
+
+This is the distinction that makes the ledger usable.
+
+| | meaning | lifetime |
+| --- | --- | --- |
+| `track_id` | which ByteTrack detection run | **temporary** - re-minted whenever a product is occluded past `max_missed_frames` |
+| `product_id` | which physical object | **stable** for the session - e.g. `bottle#1` |
+
+ByteTrack alone cannot tell you that the detection reappearing inside the basket
+is the same bottle that was on the shelf a moment ago. Naively writing the track
+id into the ledger produces exactly the churn you would expect: one `cell phone`
+becoming `#3`, `#4`, `#5`, `#6`, `#7`, `#8`, `#9`, each ending in `TRACK_LOST`,
+and every re-detection looking like a *different* product.
+
+So `app/registry.py` maps track ids onto product ids using three signals, in
+descending order of reliability:
+
+1. **Interaction history** - a product that was `IN_BASKET` and then went dark is
+   overwhelmingly likely to be the thing now sitting in the basket (`1.0`); `IN_HAND` scores `0.55`; `LIFTING` `0.35`.
+2. **Spatial continuity** - where it disappeared vs where it reappeared, normalised by the frame diagonal.
+3. **Appearance** - a 3×3×3 RGB histogram of the centre crop plus aspect ratio and relative size (`app/appearance.py`).
+
+Score = `0.40·history + 0.35·spatial + 0.25·appearance`, threshold `0.42`.
+
+Two deliberate details:
+
+* **Distance is a soft penalty, not a veto.** Carrying a product from the shelf
+  to the basket routinely moves it further than any sane pixel gate, so a product
+  last seen `IN_BASKET` may reappear anywhere. Anything else is rejected if it
+  reappears too far away.
+* **State carries over.** When a track id is re-associated, the interaction
+  engine revives the existing state - anchor, counters, history - instead of
+  starting a fresh product. The identity is recorded in
+  `snapshot["reassociations"]` with the per-signal evidence, so you can audit
+  why two detections were linked.
+
+### Basket identity
+
+The basket is tracked as an *object*, not just a region, so it has its own
+`basket_track_id` and the ledger records a relationship between two identities
+rather than claiming the product became the basket:
+
+```json
+{"product_id": "bottle#1", "product_track_id": 7,
+ "basket_track_id": 3, "event": "PLACED_IN_BASKET"}
+```
+
+A `basket` class in the YOLO model is tracked with its own ByteTrack. The drawn
+ROI fallback gets one stable id (`>= 100000`) per session and is retired as soon
+as a real detection takes over.
+
+### Occlusion into the basket
+
+A product dropped into a basket is often hidden afterwards. Absence of a
+detection is *not* evidence of anything, so the system uses the history: a
+product that was `IN_HAND` and had been overlapping the basket is recorded as
+`PLACED_IN_BASKET` with `inferred = 1` when it is occluded, rather than as a lost
+track. The dashboard badges these `inferred` so the owner can tell an inference
+from a direct observation. Disable with
+`SURVEIL_T_INFER_BASKET_ON_OCCLUSION=false`.
+
+### Confirming a purchase
+
+`POST /api/checkout` settles **one specific interaction**. Pass the `event_uid`
+the owner clicked and only that interaction and later ones are closed - so a
+product that was picked up, put back, and picked up again does not retroactively
+resolve the abandoned first attempt.
 
 ### Layout
 
@@ -62,21 +130,24 @@ surveil/
   backend/
     app/
       api.py           FastAPI routes (both tabs)
+      appearance.py    colour/shape descriptors for re-identification
+      baskets.py       basket identity (its own basket_track_id)
       camera.py        threaded video source with a drop-latest frame buffer
       config.py        settings + state machine thresholds (env overridable)
       detection.py     YOLO wrapper, class -> role mapping, basket zone
       geometry.py      BBox maths (IoU, overlap, centre distance)
       hand_tracking.py persistent hand ids -> customer/session ids
-      hands.py         ONNX / mediapipe hand detectors
+      hands.py         ONNX / pose-wrist / MediaPipe hand detectors
       interaction.py   the product state machine
       ledger.py        Product Interaction Ledger
       overlay.py       annotated frame renderer
       pipeline.py      orchestration
+      registry.py      stable product_id, re-association after track loss
       tracking/        ByteTrack + Kalman filter
     tools/
       convert_hand_model.py   TF1 frozen graph -> ONNX (one-off)
       make_demo_clip.py       generate a test clip without a webcam
-    tests/             43 tests, no camera or weights required
+    tests/             112 tests, no camera or weights required
   frontend/             Next.js (App Router) + Tailwind
   vendor/handtracking/  the imported hand model (gitignored)
   data/                 SQLite ledger + demo clips (gitignored)
@@ -240,10 +311,15 @@ customer, not face recognition - a laptop camera cannot do that reliably.
 
 ## Basket detection
 
-A basket class in YOLO is always preferred, so the zone is detected rather than
-drawn by hand. `SURVEIL_BASKET_CLASS_NAMES` lists the accepted names
-(`basket`, `shopping_basket`, `tote`, ...). When the model has no basket class, a
-normalised `SURVEIL_BASKET_ROI` region is used as a fallback, editable from Tab 1.
+A `basket` class in the YOLO model is always preferred, so the zone is detected
+rather than drawn by hand. `SURVEIL_BASKET_CLASS_NAMES` lists the accepted names
+(`basket`, `shopping_basket`, `tote`, ...).
+
+**Stock COCO has no basket class** (only `handbag`), so out of the box the drawn
+region is used instead. `SURVEIL_BASKET_ROI` ships with a working default and is
+edited by **dragging on the live feed** in Tab 1 - far easier than reading
+coordinates off a screenshot. See [Basket identity](#basket-identity) for how the
+basket gets its own `basket_track_id`.
 
 ---
 
@@ -263,19 +339,22 @@ Full interactive documentation at `http://127.0.0.1:8000/docs`.
 | `PATCH` | `/api/settings/thresholds` | retune the state machine live |
 | `POST` | `/api/settings/basket-roi` | set/clear the fallback basket region |
 | `GET` | `/api/config` | settings + the live state machine description |
+| `GET` | `/api/hand-backends` | available hand backends and which is active |
+| `POST` | `/api/hand-backend` | switch hand backend at runtime, no restart |
 
 ### Ledger
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/api/events` | filter by `type`, `product_id`, `session_id`, `resolved` |
-| `GET` | `/api/stats` | event counts per type |
-| `GET` | `/api/products` | detected product catalogue |
-| `GET` | `/api/basket` | in-basket products awaiting owner confirmation |
+| `GET` | `/api/stats` | event counts per type + pending totals |
+| `GET` | `/api/products` | catalogue **plus** stable `identities` and `reassociations` |
+| `GET` | `/api/baskets` | tracked baskets and which product ids are in each |
+| `GET` | `/api/pending` | owner decisions outstanding, `in_hand` **or** `in_basket` |
 | `GET` | `/api/alerts` | unaccounted + lost-track alerts |
 | `GET` | `/api/purchases` | confirmed sales |
 | `GET` | `/api/sessions` | camera sessions |
-| `POST` | `/api/checkout` | owner confirms a purchase -> `CHECKED_OUT` |
+| `POST` | `/api/checkout` | confirm one interaction -> `CHECKED_OUT` |
 | `POST` | `/api/events/{uid}/resolve` | acknowledge an event |
 | `GET` | `/api/ledger/export.csv` | the ledger as CSV |
 
@@ -297,20 +376,28 @@ cd backend
 .venv\Scripts\python -m pytest tests -q
 ```
 
-43 tests, none of which need a camera, model weights or the converted hand model
-(the two hand tests skip themselves if the ONNX model is absent):
+112 tests, none of which need a camera or model weights (the two hand tests skip
+themselves if the ONNX model is absent):
 
 * `test_interaction.py` - every state transition and threshold, including the
-  false-alarm rollback, the put-back re-anchoring, and the `LOST` timeout.
+  false-alarm rollback, the put-back re-anchoring, the `LOST` timeout, and a
+  **drift + jitter regression test** for the settling bug that used to freeze
+  every product at `ON_SHELF`.
+* `test_identity_and_baskets.py` - product identity vs track identity,
+  re-association scoring, basket id stability, and occlusion-tolerant basket entry.
 * `test_tracking_and_ledger.py` - track-id persistence, the low-score recovery
   pass, class-aware association, `max_age` counting, and the ledger's derived
   views (checkout, unaccounted alerts, CSV export).
 * `test_pipeline_integration.py` - the whole pipeline driven by scripted fake
   detectors: a full pickup-to-basket produces `TOUCH` -> `PICKED_UP` ->
-  `PLACED_IN_BASKET` in the ledger, and the person class is counted but never
-  tracked.
-* `test_hands.py` - NMS, the upstream label map, and the converted ONNX hand
-  model against the image vendored with the handtracking repo.
+  `PLACED_IN_BASKET`, the person class is counted but never tracked, and
+  **track churn does not create new products**.
+* `test_api.py` - the REST surface end to end, including that *Mark as bought*
+  settles only the clicked interaction.
+* `test_hands.py` - NMS, the upstream label map, the converted ONNX hand model
+  against the vendored test image, and the pose wrist proxy.
+* `test_pending_and_pose.py` - outstanding pickups, basket ROI resolution, pose backend.
+* `test_config_and_source.py` - settings, source resolution, threshold defaults.
 
 ---
 
@@ -318,16 +405,21 @@ cd backend
 
 * The imported hand model was trained on **EgoHands** (egocentric views), so it
   sees some false positives on faces and sleeves from a third-person laptop
-  camera. Raise `SURVEIL_HAND_CONF_THRESHOLD` or fine-tune on shop footage.
+  camera. Raise `SURVEIL_HAND_CONF_THRESHOLD`, or switch to the `pose` backend
+  from Tab 1 if it cannot see hands on your shelf at all.
+* **If the hand detector is blind, no product can leave `ON_SHELF`** - the touch
+  signal gates `LIFTING`. The HUD shows `NO HANDS DETECTED` and Tab 1 shows a
+  warning chip so this is never a silent mystery.
 * Throughput is ~5 fps on CPU. Enable the YOLO device and lower
   `SURVEIL_YOLO_IMGSZ` / `SURVEIL_FRAME_*` for more.
 * A product that teleports across the frame in a single frame is a new track, not
   a moved one - see the IoU note above.
-* The default YOLO checkpoint is COCO. A real shop wants a fine-tuned model; set
-  `SURVEIL_YOLO_MODEL` to it.
-* `IN_BASKET` is not cleared by the CV system. Only an owner confirmation in
-  Tab 2 resolves it, by design.
-
+* The default YOLO checkpoint is COCO, which has **no basket class** - use the
+  drawn basket region, or point `SURVEIL_YOLO_MODEL` at a model that has one.
+* Re-identification is heuristic. It is deliberately conservative and reports its
+  evidence in `snapshot["reassociations"]` so links can be audited, but two
+  identical products left in different places can still be confused.
+* * 
 ## Attribution
 
 Hand detection model: [victordibia/handtracking](https://github.com/victordibia/handtracking)
