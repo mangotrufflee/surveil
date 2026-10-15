@@ -95,6 +95,7 @@ class Pipeline:
         self._frame_lock = threading.Lock()
         self._last_hand_seen: float | None = None
         self._reassociations: list[dict[str, Any]] = []
+        self._identity_ambiguities: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------ status
     @property
@@ -118,6 +119,7 @@ class Pipeline:
             "states": {},
             "hud": {},
             "recent_events": [],
+            "identity_ambiguities": [],
             "thresholds": self.settings.thresholds.model_dump(mode="json"),
         }
 
@@ -164,6 +166,9 @@ class Pipeline:
         self.registry = ProductRegistry(
             session_id,
             identity_hold_seconds=settings.identity_hold_seconds,
+            max_reassociate_distance_px=settings.identity_max_reassociate_distance_px,
+            min_score=settings.identity_min_score,
+            ambiguity_margin=settings.identity_ambiguity_margin,
         )
         self.baskets = BasketTracker(max_age=settings.thresholds.max_missed_frames)
         # must reset, otherwise the new session's throughput is computed against
@@ -358,16 +363,25 @@ class Pipeline:
             raw_hands = []
         tracked_hands = self.hand_tracker.update(raw_hands, ts)
 
-        # ---- stable product identity ------------------------------------
-        # ByteTrack ids are temporary. Map each one onto a product_id that
-        # survives the track dying, so a re-detection of the same physical
-        # object does not become a new product in the ledger.
+        # ---- product identity --------------------------------------------
+        # Every track the tracker owns is fed through, coasting ones included.
+        # Dropping them (as this used to) meant the registry was blind for the
+        # whole occlusion, so the binding was torn down and had to be re-earned
+        # by scoring on the way back. Coast/tracks identity is a fact about the
+        # tracker, and only the tracker knows it.
         frame_size = (image.shape[1], image.shape[0])
+
+        # Tell the registry which tracks still exist before resolving, so a
+        # binding whose track id has just been dropped becomes a candidate
+        # instead of being stranded as "live but pointing at a dead id".
+        present = {t.track_id for t in det.tracks}
+        self.registry.observe_tracks(present, ts)
+
         engine_input = []
         for t in det.tracks:
-            if t.predicted:
-                continue
-            descriptor = describe(image, t.bbox.to_xyxy())
+            # Appearance is only sampled from frames the detector actually saw:
+            # a coasted box is often drawn over the occluder itself.
+            descriptor = describe(image, t.bbox.to_xyxy()) if t.observed else None
             match = self.registry.resolve(
                 track_id=t.track_id,
                 class_name=t.class_name,
@@ -375,6 +389,7 @@ class Pipeline:
                 descriptor=descriptor,
                 ts=ts,
                 frame_size=frame_size,
+                observed=t.observed,
             )
             if match.evidence == "reassociated":
                 self._reassociations.append(
@@ -389,8 +404,23 @@ class Pipeline:
                 )
                 if len(self._reassociations) > 50:
                     self._reassociations = self._reassociations[-50:]
+            elif match.ambiguous:
+                # We could not tell which physical product this was, so we did
+                # not merge. Recorded so the owner sees the uncertainty instead
+                # of a confident-looking wrong identity.
+                self._identity_ambiguities.append(
+                    {
+                        "ts": ts,
+                        "product_id": match.product_id,
+                        "track_id": t.track_id,
+                        "class_name": t.class_name,
+                        **match.detail,
+                    }
+                )
+                if len(self._identity_ambiguities) > 50:
+                    self._identity_ambiguities = self._identity_ambiguities[-50:]
             engine_input.append(
-                (t.track_id, match.product_id, t.class_name, t.bbox, t.score)
+                (t.track_id, match.product_id, t.class_name, t.bbox, t.score, t.observed)
             )
 
         hand_input = [(h.hand_id, HandBox(h.box, h.score)) for h in tracked_hands]
@@ -484,6 +514,7 @@ class Pipeline:
             "products_registry": self.registry.snapshot() if self.registry else [],
             "baskets": self.baskets.snapshot() if self.baskets else [],
             "reassociations": self._reassociations[-12:],
+            "identity_ambiguities": self._identity_ambiguities[-12:],
             "states": {str(s["track_id"]): s for s in states},
             "hud": {
                 "fps": round(self.status.fps, 2),

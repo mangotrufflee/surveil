@@ -75,6 +75,13 @@ class Detection:
     score: float
 
 
+# Detection status of a track in a given frame. Explicit so callers never have to
+# infer it from `time_since_update`, and so "the tracker still owns this object"
+# is distinguishable from "the detector currently sees this object".
+STATUS_OBSERVED = "observed"
+STATUS_COASTING = "coasting"
+
+
 @dataclass
 class TrackResult:
     track_id: int
@@ -85,6 +92,12 @@ class TrackResult:
     predicted: bool
     time_since_update: int
     hits: int
+    status: str = STATUS_OBSERVED
+    observed: bool = True
+
+    @property
+    def coasting(self) -> bool:
+        return not self.observed
 
 
 @dataclass
@@ -214,6 +227,8 @@ class ByteTracker:
                 predicted=t.time_since_update > 0,
                 time_since_update=t.time_since_update,
                 hits=t.hits,
+                status=STATUS_OBSERVED if t.time_since_update == 0 else STATUS_COASTING,
+                observed=t.time_since_update == 0,
             )
             for t in self.tracks
         ]

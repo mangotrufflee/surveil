@@ -349,6 +349,7 @@ def products() -> dict[str, Any]:
         "products": ledger.product_catalog(),
         "identities": pipeline.registry.snapshot() if pipeline.registry else [],
         "reassociations": pipeline._reassociations[-12:],
+        "identity_ambiguities": pipeline._identity_ambiguities[-12:],
     }
 
 

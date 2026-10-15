@@ -95,10 +95,23 @@ class Settings(BaseSettings):
     tracker_match_threshold: float = 0.3
     tracker_second_match_threshold: float = 0.15
 
-    # How long a product identity is held after its track dies, so a later
-    # detection can be re-associated onto the same product_id. Roughly the
-    # window a shopper might occlude an item inside a basket.
-    identity_hold_seconds: float = 45.0
+    # How long a product identity is held after the tracker lets it go, so a
+    # later detection can be re-associated onto the same product_id. This is the
+    # ceiling on "we can still tell which product that was" - beyond it the
+    # identity is explicitly released and a new product_id is minted.
+    identity_hold_seconds: float = 300.0
+    # A new track id is only re-associated onto an existing product when the
+    # combined evidence clears this bar.
+    identity_min_score: float = 0.42
+    # Hard spatial ceiling for re-association, unless interaction history is
+    # decisive (see registry.HISTORY_GATE_BYPASS). Carrying an item to a basket
+    # routinely exceeds any sane pixel gate, so this is deliberately soft.
+    identity_max_reassociate_distance_px: float = 260.0
+    # If the best and second-best candidates score within this margin the match
+    # is ambiguous: two identical products are on the shelf and we cannot tell
+    # which one came back. We refuse to merge and report the uncertainty rather
+    # than silently guessing.
+    identity_ambiguity_margin: float = 0.08
 
     # ---- hand detection (victordibia/handtracking) ----------------------
     # auto | onnx | pose | mediapipe | off

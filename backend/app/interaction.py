@@ -111,6 +111,13 @@ class ProductTrack:
     reassociated_from: int | None = None
     inferred_basket_entry: bool = False
 
+    # Detection status. A coasting track is still owned by the tracker but was
+    # not seen by the detector this frame; its box is the Kalman prediction, so
+    # it must not drive geometry or confirm an interaction.
+    coasting: bool = False
+    coasting_frames: int = 0
+    last_observed_ts: float = 0.0
+
     def set_state(self, state: ProductState, ts: float) -> None:
         if state is self.state:
             return
@@ -154,17 +161,37 @@ class InteractionEngine:
         self,
         frame: int,
         ts: float,
-        products: list[tuple[int, str, str, BBox, float]],
+        products: list[tuple],
         hands: list[tuple[int, HandBox]],
         basket_zone: BBox | None,
         basket_track_id: int | None = None,
     ) -> list[InteractionEvent]:
+        """Advance the state machine one frame.
+
+        `products` entries are `(track_id, product_id, product_name, box, score)`
+        or the 6-tuple form `(..., score, observed)`. The 5-tuple form means
+        observed, so existing callers keep their behaviour.
+
+        A track reported as *not* observed is coasting: the tracker still owns
+        it but the detector did not see it this frame. Such a track is kept alive
+        and keeps its state, but its predicted box is never used to drive
+        geometry and it can never confirm an event. Only observed detections
+        count towards `missed_frames` reset, so a product that is coasting
+        through an occlusion ages out on the same schedule as before.
+        """
         events: list[InteractionEvent] = []
 
         seen: set[int] = set()
-        for track_id, product_id, product_name, box, score in products:
+        for entry in products:
+            if len(entry) == 5:
+                track_id, product_id, product_name, box, score = entry
+                observed = True
+            else:
+                track_id, product_id, product_name, box, score, observed = entry
+
             seen.add(track_id)
             track = self.tracks.get(track_id)
+
             if track is None:
                 revived = self._revive(product_id)
                 if revived is not None:
@@ -174,8 +201,12 @@ class InteractionEngine:
                     revived.box = box
                     revived.prev_box = box
                     revived.missed_frames = 0
+                    revived.coasting_frames = 0
+                    revived.coasting = not observed
                     revived.score = score
                     revived.last_seen = ts
+                    if observed:
+                        revived.last_observed_ts = ts
                     self.tracks[track_id] = revived
                     self.finished = [t for t in self.finished if t.product_id != product_id]
                     events.extend(self._resumed(revived, ts))
@@ -192,10 +223,20 @@ class InteractionEngine:
                     track.anchor = box
                     self.tracks[track_id] = track
 
-            track.prev_box = track.box
-            track.box = box
             track.score = score
             track.last_seen = ts
+
+            # --- coasting: hold state, trust nothing ------------------------
+            if not observed:
+                track.coasting = True
+                track.coasting_frames += 1
+                continue
+
+            track.coasting = False
+            track.coasting_frames = 0
+            track.last_observed_ts = ts
+            track.prev_box = track.box
+            track.box = box
             track.missed_frames = 0
 
             # --- signals ---------------------------------------------------
@@ -216,11 +257,10 @@ class InteractionEngine:
 
             events.extend(self._transition(track, ts))
 
-        # --- expire tracks that the detector stopped reporting ------------
-        for track_id in list(self.tracks.keys()):
-            if track_id in seen:
-                continue
-            track = self.tracks[track_id]
+        # --- expire tracks the detector is not currently reporting ----------
+        for track_id, track in list(self.tracks.items()):
+            if track_id in seen and not track.coasting:
+                continue  # observed this frame, missed_frames already reset
             track.missed_frames += 1
             if track.missed_frames >= self.t.max_missed_frames:
                 events.extend(self._expire(track, ts))
@@ -229,11 +269,45 @@ class InteractionEngine:
 
     # ------------------------------------------------------------- re-identity
     def _revive(self, product_id: str) -> ProductTrack | None:
-        """Recover the state of a recently-lost product with the same identity."""
-        for track in self.finished:
-            if track.product_id == product_id:
-                return track
-        return None
+        """Recover the state of a recently-lost product with the same identity.
+
+        Keyed on `product_id` - the registry-resolved identity - so revival works
+        whenever the identity layer recovered the product, whether the track id
+        changed or not. A revived product is a genuinely new observation, so it
+        does not depend on a freshly minted identity ever appearing.
+
+        A track that expired into LOST is reset to ON_SHELF but keeps its shelf
+        anchor: it is the same object, we know where it lives. Counts that were
+        mid-transition are cleared so confirmation cannot be inherited from an
+        absence.
+        """
+        candidates = [t for t in self.finished if t.product_id == product_id]
+        if not candidates:
+            return None
+        track = max(candidates, key=lambda t: t.last_seen)
+
+        if track.state is ProductState.LOST:
+            track.state = ProductState.ON_SHELF
+            track.state_since = track.last_seen
+            track.lift_frames = 0
+            track.return_frames = 0
+            track.basket_frames = 0
+            track.touch_frames = 0
+            track.touch_emitted = False
+            track.displaced = False
+            track.displacement_px = 0.0
+            track.missed_frames = 0
+            track.coasting_frames = 0
+            track.coasting = False
+            track.anchor_confirmed = False
+            track.settle_frames = 0
+            track.picked_up_at = None
+
+        # Bound the revival pool: identities the registry can still recover are
+        # finite per session, so keeping every expired track forever is waste.
+        if len(self.finished) > 32:
+            self.finished = self.finished[-32:]
+        return track
 
     def _resumed(self, track: ProductTrack, ts: float) -> list[InteractionEvent]:
         """Emit nothing, but leave a breadcrumb that the identity was resumed."""
@@ -382,6 +456,8 @@ class InteractionEngine:
             track.set_state(ProductState.IN_BASKET, ts)
         elif self.t.lost_emit_event and self.t.mark_lost_state:
             out.append(self._event(track, ts, EventType.TRACK_LOST, missed=track.missed_frames))
+        track.coasting = False
+        track.coasting_frames = 0
         self.tracks.pop(track.track_id, None)
         self.finished.append(track)
         return out
@@ -434,6 +510,9 @@ class InteractionEngine:
                     "product_id": track.product_id,
                     "product_name": track.product_name,
                     "state": track.state.value,
+                    "coasting": track.coasting,
+                    "coasting_frames": track.coasting_frames,
+                    "last_observed_ts": round(track.last_observed_ts, 3),
                     "anchor": track.anchor.as_list() if track.anchor else None,
                     "anchor_confirmed": track.anchor_confirmed,
                     "settle_frames": track.settle_frames,
