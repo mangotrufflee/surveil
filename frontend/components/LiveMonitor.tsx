@@ -61,30 +61,30 @@ export default function LiveMonitor() {
   })();
 
   return (
-    <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
+    <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_390px]">
       {/* ------------------------------------------------------ stream column */}
-      <div className="space-y-4">
+      <div className="space-y-5">
         <section className="panel overflow-hidden">
           <div className="panel-head">
-            <div className="flex items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
               <span className="panel-title">Live CCTV Monitor</span>
               <span
                 className={`chip ${
                   running
-                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-                    : "border-rose-500/40 bg-rose-500/10 text-rose-300"
+                    ? "border-teal-200 bg-mint-200/70 text-teal-700"
+                    : "border-rose-200 bg-rose-200/50 text-rose-300"
                 }`}
               >
                 <span
                   className={`mr-1 inline-block h-1.5 w-1.5 rounded-full ${
-                    running ? "animate-pulse bg-emerald-400" : "bg-rose-400"
+                    running ? "animate-pulse bg-teal-500" : "bg-rose-400"
                   }`}
                 />
                 {running ? "STREAMING" : "STOPPED"}
               </span>
               {snap && snap.ignored_count > 0 && (
                 <span
-                  className="chip border-ink-600 bg-ink-800 text-slate-400"
+                  className="chip border-lavender-300 bg-lavender-100 text-navy-500"
                   title="The person class is counted but never boxed, highlighted or tracked."
                 >
                   {snap.ignored_count} {snap.ignored_classes.join("/")} in frame - not tracked
@@ -92,21 +92,17 @@ export default function LiveMonitor() {
               )}
               {snap?.hands_blind && (
                 <span
-                  className="chip border-rose-500/50 bg-rose-500/15 text-rose-300"
+                  className="chip border-rose-200 bg-rose-200/50 text-rose-300"
                   title="Hand detection sees nothing, so no product can leave ON_SHELF. Switch the hand backend in the thresholds panel."
                 >
                   no hands detected - pickups cannot be confirmed
                 </span>
               )}
             </div>
-            <div className="flex items-center gap-2">
-              <span className="font-mono text-[10px] text-slate-500">
-                {status?.session_id ?? "no session"}
-              </span>
-            </div>
+            <span className="meta hidden sm:block">{status?.session_id ?? "no session"}</span>
           </div>
 
-          <div ref={frameRef} className="relative bg-black">
+          <div ref={frameRef} className="bg-navy-900">
             {running ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
@@ -116,14 +112,14 @@ export default function LiveMonitor() {
                 className="block max-h-[68vh] w-full object-contain"
               />
             ) : (
-              <div className="flex aspect-video flex-col items-center justify-center gap-2 text-slate-500">
-                <div className="text-sm">Camera is stopped</div>
+              <div className="flex aspect-video flex-col items-center justify-center gap-2 bg-gradient-to-br from-lavender-100 to-mint-100 text-navy-400">
+                <div className="text-sm font-medium text-navy-600">Camera is stopped</div>
                 <div className="text-[11px]">Start the pipeline to begin observing.</div>
               </div>
             )}
           </div>
 
-          <div className="flex flex-wrap items-end gap-2 border-t border-ink-700 p-3">
+          <div className="flex flex-wrap items-end gap-2 border-t border-lavender-200 bg-lavender-100/60 p-4">
             <div>
               <label className="label" htmlFor="source">
                 Video source (camera index or file path)
@@ -166,16 +162,16 @@ export default function LiveMonitor() {
             </button>
           </div>
           {actionError && (
-            <div className="border-t border-rose-500/30 bg-rose-500/10 px-3 py-2 font-mono text-[11px] text-rose-300">
+            <div className="note border-rose-200 bg-rose-200/40 font-mono text-[11px] text-rose-300">
               {actionError}
             </div>
           )}
         </section>
 
         {showSettings && (
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
             <ThresholdsPanel onSaved={() => { refresh(); refreshStatus(); }} />
-            <div className="space-y-4">
+            <div className="space-y-5">
               <BasketRoiPicker
                 frameSize={snap?.frame_size ?? null}
                 roi={liveRoi}
@@ -194,13 +190,13 @@ export default function LiveMonitor() {
       </div>
 
       {/* -------------------------------------------------------- side column */}
-      <div className="space-y-4">
+      <div className="space-y-5">
         <section className="panel">
           <div className="panel-head">
             <span className="panel-title">Product states</span>
-            <span className="font-mono text-[10px] text-slate-500">{states.length} tracked</span>
+            <span className="meta">{states.length} tracked</span>
           </div>
-          <div className="max-h-[38vh] overflow-y-auto p-2">
+          <div className="max-h-[38vh] space-y-2 overflow-y-auto p-3">
             {states.length === 0 && <Empty text="No products on the shelf yet." />}
             {states.map((s) => {
               const t = s.state;
@@ -220,61 +216,59 @@ export default function LiveMonitor() {
               return (
                 <div
                   key={s.track_id}
-                  className="mb-1.5 rounded-lg border border-ink-700 bg-ink-850/60 p-2.5"
+                  className="rounded-2xl border border-lavender-200 bg-lavender-100/70 p-3"
                 >
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex min-w-0 items-center gap-2">
-                      <span className="truncate text-xs font-medium text-slate-200">
+                      <span className="truncate text-xs font-medium text-navy-800">
                         {s.product_name}
                       </span>
-                      <span className="font-mono text-[10px] text-slate-500">
-                        #{s.track_id}
-                      </span>
+                      <span className="meta">#{s.track_id}</span>
                     </div>
                     <StateBadge state={t} pulse={busy} />
                   </div>
 
-                  <div className="mt-1.5 flex flex-wrap gap-1.5 text-[9px] uppercase tracking-wider">
+                  <div className="mt-2 flex flex-wrap gap-1.5 text-[9px] uppercase tracking-wider">
                     {!s.anchor_confirmed && (
-                      <span className="chip border-ink-600 bg-ink-800 text-slate-400">
+                      <span className="chip border-lavender-300 bg-white text-navy-500">
                         settling {s.settle_frames}/{snap?.thresholds.settle_frames ?? 15}
                       </span>
                     )}
                     {s.touching && (
-                      <span className="chip border-state-hand/40 bg-state-hand/10 text-state-hand">
+                      <span className="chip border-[#EEDBCF] bg-[#FBEEE7] text-[#A85F3C]">
                         hand {s.hand_id ?? "-"}
                       </span>
                     )}
                     <span
                       className={`chip ${
                         s.displaced
-                          ? "border-state-lifting/40 bg-state-lifting/10 text-state-lifting"
-                          : "border-ink-600 bg-ink-800 text-slate-500"
+                          ? "border-amber-200 bg-amber-200/60 text-amber-300"
+                          : "border-lavender-300 bg-white text-navy-500"
                       }`}
                     >
                       {s.displacement_px.toFixed(0)}px / {snap?.thresholds.shelf_displacement_px ?? 60}px
                     </span>
                     {s.basket_overlap > 0 && (
-                      <span className="chip border-state-basket/40 bg-state-basket/10 text-state-basket">
+                      <span className="chip border-[#E0DDF6] bg-[#F1EFFC] text-[#5F58AE]">
                         basket {(s.basket_overlap * 100).toFixed(0)}%
                       </span>
                     )}
-                    <span className="chip border-ink-600 bg-ink-800 text-slate-500">
+                    <span className="chip border-lavender-300 bg-white text-navy-500">
                       age {ago(s.age_s)}
                     </span>
                   </div>
 
                   {progress && (
-                    <div className="mt-2">
-                      <div className="h-1 overflow-hidden rounded bg-ink-700">
+                    <div className="mt-2.5">
+                      <div className="h-1.5 overflow-hidden rounded-full bg-lavender-200">
                         <div
-                          className="h-full bg-emerald-400 transition-all"
+                          className="h-full rounded-full bg-teal-500 transition-all"
                           style={{
                             width: `${Math.min(100, (progress.have / Math.max(1, progress.need)) * 100)}%`,
                           }}
                         />
                       </div>
-                      <div className="mt-1 font-mono text-[9px] text-slate-500">
+                      <div className="mt-1.5 font-mono text-[9px] text-navy-400">
                         {progress.have}/{progress.need} frames to confirm
                       </div>
                     </div>
@@ -285,27 +279,29 @@ export default function LiveMonitor() {
           </div>
         </section>
 
-        <section className="panel">
-          <div className="panel-head">
-            <span className="panel-title">Hands / customers</span>
-            <span className="font-mono text-[10px] text-slate-500">{hands.length}</span>
+        <section className="panel-dark">
+          <div className="flex items-center justify-between gap-3 border-b border-white/10 px-5 py-3">
+            <span className="text-[11px] font-semibold uppercase tracking-[0.16em] text-mint-200">
+              Hands / customers
+            </span>
+            <span className="font-mono text-[10px] text-lavender-300">{hands.length}</span>
           </div>
-          <div className="max-h-40 overflow-y-auto p-2">
+          <div className="max-h-40 space-y-1.5 overflow-y-auto p-3">
             {hands.length === 0 && (
-              <Empty text="No hands detected. Hand model is driving the touch signal." />
+              <Empty text="No hands detected. Hand model is driving the touch signal." dark />
             )}
             {hands.map((h) => (
               <div
                 key={h.hand_id}
-                className="mb-1 flex items-center justify-between rounded-md border border-ink-700 bg-ink-850/60 px-2.5 py-1.5"
+                className="flex items-center justify-between rounded-xl border border-white/10 bg-white/5 px-3 py-2"
               >
-                <span className="font-mono text-[11px] text-slate-300">
+                <span className="font-mono text-[11px] text-lavender-100">
                   {h.customer_id}{" "}
-                  <span className="text-slate-600">
+                  <span className="text-lavender-300/70">
                     (hand {h.hand_id}, {h.hits} frames)
                   </span>
                 </span>
-                <span className="font-mono text-[10px] text-slate-500">
+                <span className="font-mono text-[10px] text-mint-200">
                   {(h.score * 100).toFixed(0)}%
                 </span>
               </div>
@@ -316,23 +312,21 @@ export default function LiveMonitor() {
         <section className="panel">
           <div className="panel-head">
             <span className="panel-title">Interaction engine</span>
-            <span className="font-mono text-[10px] text-slate-500">
-              yolo {String(snap?.hud.infer_ms ?? 0)}ms
-            </span>
+            <span className="meta">yolo {String(snap?.hud.infer_ms ?? 0)}ms</span>
           </div>
-          <div className="max-h-56 space-y-1 overflow-y-auto p-2">
+          <div className="max-h-56 space-y-1.5 overflow-y-auto p-3">
             {events.length === 0 && <Empty text="No events emitted in this session yet." />}
             {events.map((e) => (
               <div
                 key={e.event_uid}
-                className="flex items-center gap-2 rounded-md border border-ink-700 bg-ink-850/60 px-2.5 py-1.5"
+                className="flex items-center gap-2 rounded-xl border border-lavender-200 bg-lavender-100/70 px-3 py-2"
               >
-                <span className="font-mono text-[10px] text-slate-500">{clock(e.ts)}</span>
+                <span className="meta">{clock(e.ts)}</span>
                 <EventBadge type={e.type} />
-                <span className="truncate text-[11px] text-slate-300">{e.product_name}</span>
-                <span className="font-mono text-[10px] text-slate-600">#{e.track_id}</span>
+                <span className="truncate text-[11px] text-navy-700">{e.product_name}</span>
+                <span className="meta ml-auto shrink-0">#{e.track_id}</span>
                 {e.hand_id != null && (
-                  <span className="font-mono text-[10px] text-slate-600">hand {e.hand_id}</span>
+                  <span className="meta shrink-0">hand {e.hand_id}</span>
                 )}
               </div>
             ))}
@@ -340,7 +334,7 @@ export default function LiveMonitor() {
         </section>
 
         {error && (
-          <div className="panel border-rose-500/40 p-3 font-mono text-[11px] text-rose-300">
+          <div className="panel border-rose-200 p-4 font-mono text-[11px] text-rose-300">
             backend unreachable: {error}
           </div>
         )}
@@ -349,6 +343,14 @@ export default function LiveMonitor() {
   );
 }
 
-function Empty({ text }: { text: string }) {
-  return <div className="px-2 py-4 text-center text-[11px] text-slate-600">{text}</div>;
+function Empty({ text, dark }: { text: string; dark?: boolean }) {
+  return (
+    <div
+      className={`px-2 py-6 text-center text-[11px] ${
+        dark ? "text-lavender-300/80" : "text-navy-400"
+      }`}
+    >
+      {text}
+    </div>
+  );
 }

@@ -92,14 +92,14 @@ export default function ThresholdsPanel({ onSaved }: { onSaved?: () => void }) {
           {busy ? "Saving..." : `Apply${Object.keys(values).length ? ` (${Object.keys(values).length})` : ""}`}
         </button>
       </div>
-      <div className="space-y-2.5 p-3">
+      <div className="space-y-3 p-4">
         {FIELDS.map((f) => (
           <label key={f.key} className="block">
             <span className="label">{f.label}</span>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-3">
               <input
                 type="number"
-                className="field w-24"
+                className="field w-28"
                 step={f.step ?? 1}
                 min={f.min}
                 max={f.max}
@@ -114,7 +114,7 @@ export default function ThresholdsPanel({ onSaved }: { onSaved?: () => void }) {
                   });
                 }}
               />
-              <span className="text-[10px] leading-tight text-slate-500">{f.hint}</span>
+              <span className="text-[10px] leading-tight text-navy-500">{f.hint}</span>
             </div>
           </label>
         ))}
@@ -122,16 +122,17 @@ export default function ThresholdsPanel({ onSaved }: { onSaved?: () => void }) {
         <label className="flex items-center gap-2 pt-1">
           <input
             type="checkbox"
+            className="h-3.5 w-3.5 accent-[#438D8B]"
             checked={values.mark_lost_state === undefined ? true : Boolean(values.mark_lost_state)}
             onChange={(e) => setValues((p) => ({ ...p, mark_lost_state: e.target.checked }))}
           />
-          <span className="text-[10px] uppercase tracking-wider text-slate-500">
+          <span className="text-[10px] uppercase tracking-wider text-navy-500">
             enter the LOST state when a track expires
           </span>
         </label>
 
-        {msg && <div className="font-mono text-[10px] text-emerald-400">{msg}</div>}
-        {err && <div className="font-mono text-[10px] text-rose-400">{err}</div>}
+        {msg && <div className="font-mono text-[10px] text-teal-600">{msg}</div>}
+        {err && <div className="font-mono text-[10px] text-rose-300">{err}</div>}
       </div>
     </section>
   );

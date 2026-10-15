@@ -15,16 +15,16 @@ export default function TabBar({
   onChange: (t: TabKey) => void;
 }) {
   return (
-    <div className="flex rounded-lg border border-ink-700 bg-ink-900 p-1">
+    <div className="flex rounded-full border border-lavender-200 bg-lavender-100 p-1">
       {TABS.map((t) => (
         <button
           key={t.key}
           onClick={() => onChange(t.key)}
           aria-current={tab === t.key ? "page" : undefined}
-          className={`rounded-md px-3.5 py-1.5 text-left transition ${
+          className={`rounded-full px-4 py-1.5 text-left transition ${
             tab === t.key
-              ? "bg-ink-700 text-slate-100 shadow"
-              : "text-slate-400 hover:bg-ink-850 hover:text-slate-200"
+              ? "bg-navy-800 text-white shadow-soft"
+              : "text-navy-500 hover:bg-white hover:text-navy-800"
           }`}
         >
           <div className="text-xs font-semibold">{t.label}</div>

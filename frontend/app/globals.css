@@ -3,11 +3,22 @@
 @tailwind utilities;
 
 :root {
-  color-scheme: dark;
+  color-scheme: light;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
 }
 
 body {
-  @apply bg-ink-950 text-slate-200 antialiased;
+  @apply bg-lavender-100 font-sans text-navy-800 antialiased;
+  background-image:
+    radial-gradient(60rem 40rem at 8% -10%, rgba(201, 247, 229, 0.85), transparent 60%),
+    radial-gradient(50rem 38rem at 100% 0%, rgba(228, 228, 248, 0.95), transparent 62%),
+    radial-gradient(46rem 34rem at 0% 100%, rgba(228, 228, 248, 0.85), transparent 60%),
+    radial-gradient(42rem 32rem at 92% 92%, rgba(201, 247, 229, 0.75), transparent 62%),
+    radial-gradient(38rem 30rem at 50% 45%, rgba(227, 242, 241, 0.7), transparent 65%);
+  background-attachment: fixed;
 }
 
 ::-webkit-scrollbar {
@@ -15,53 +26,63 @@ body {
   height: 10px;
 }
 ::-webkit-scrollbar-track {
-  @apply bg-ink-900;
+  @apply bg-transparent;
 }
 ::-webkit-scrollbar-thumb {
-  @apply rounded bg-ink-600;
+  @apply rounded-full border-[3px] border-solid border-transparent bg-lavender-300 bg-clip-padding;
 }
 ::-webkit-scrollbar-thumb:hover {
-  @apply bg-ink-500;
+  @apply bg-lavender-400 bg-clip-padding;
 }
 
 @layer components {
   .panel {
-    @apply rounded-xl border border-ink-700 bg-ink-900/70;
+    @apply rounded-card border border-lavender-200 bg-white/90 shadow-soft backdrop-blur-sm;
+  }
+  .panel-dark {
+    @apply rounded-card border border-navy-800 bg-navy-800 text-lavender-200 shadow-soft;
   }
   .panel-head {
-    @apply flex items-center justify-between border-b border-ink-700 px-4 py-2.5;
+    @apply flex items-center justify-between gap-3 rounded-t-card border-b border-lavender-200
+           px-5 py-3;
   }
   .panel-title {
-    @apply text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400;
+    @apply text-[11px] font-semibold uppercase tracking-[0.16em] text-navy-600;
+  }
+  .meta {
+    @apply font-mono text-[10px] text-navy-400;
   }
   .btn {
-    @apply inline-flex items-center gap-1.5 rounded-md border border-ink-600 bg-ink-800
-           px-3 py-1.5 text-xs font-medium text-slate-200 transition
-           hover:border-ink-500 hover:bg-ink-700 disabled:cursor-not-allowed disabled:opacity-40;
+    @apply inline-flex items-center gap-1.5 rounded-full border border-lavender-300 bg-white px-3.5 py-1.5
+           text-xs font-medium text-navy-700 shadow-sm transition
+           hover:border-teal-300 hover:bg-lavender-100 hover:text-navy-800
+           disabled:cursor-not-allowed disabled:opacity-40;
   }
   .btn-primary {
-    @apply border-emerald-600/60 bg-emerald-600/20 text-emerald-300
-           hover:border-emerald-500 hover:bg-emerald-600/30;
+    @apply border-navy-800 bg-navy-800 text-white
+           hover:border-navy-700 hover:bg-navy-700;
   }
   .btn-danger {
-    @apply border-rose-600/60 bg-rose-600/20 text-rose-300
-           hover:border-rose-500 hover:bg-rose-600/30;
+    @apply border-rose-200 bg-rose-200/40 text-rose-300 hover:border-rose-400 hover:bg-rose-200/70;
   }
   .field {
-    @apply w-full rounded-md border border-ink-600 bg-ink-850 px-2.5 py-1.5
-           font-mono text-xs text-slate-200 outline-none transition
-           focus:border-emerald-500/70;
+    @apply w-full rounded-full border border-lavender-300 bg-white px-3 py-1.5
+           font-mono text-xs text-navy-800 shadow-sm outline-none transition
+           placeholder:text-navy-400 focus:border-teal-400 focus:ring-2 focus:ring-teal-200;
   }
   .label {
-    @apply mb-1 block text-[10px] font-medium uppercase tracking-wider text-slate-500;
+    @apply mb-1 block text-[10px] font-medium uppercase tracking-wider text-navy-500;
   }
   .chip {
     @apply inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold tracking-wide;
   }
   .th {
-    @apply px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-wider text-slate-500;
+    @apply px-3 py-2 text-left text-[10px] font-semibold uppercase tracking-wider text-navy-500;
   }
   .td {
-    @apply px-3 py-2 align-top font-mono text-[11px] text-slate-300;
+    @apply px-3 py-2 align-top font-mono text-[11px] text-navy-700;
+  }
+  .note {
+    @apply rounded-2xl border px-3 py-1.5 text-[11px];
   }
 }

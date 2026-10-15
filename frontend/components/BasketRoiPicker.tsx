@@ -120,13 +120,13 @@ export default function BasketRoiPicker({
     <section className="panel">
       <div className="panel-head">
         <span className="panel-title">Basket zone</span>
-        <span className="font-mono text-[10px] text-slate-500">
+        <span className="meta">
           {detected ? "detected by model" : roi ? "drawn region" : "not set"}
         </span>
       </div>
 
-      <div className="space-y-2 p-3">
-        <p className="text-[10px] leading-relaxed text-slate-500">
+      <div className="space-y-3 p-4">
+        <p className="text-[10px] leading-relaxed text-navy-500">
           {detected
             ? "The model has a basket class, so the zone is detected automatically. Drawing one still overrides it."
             : "Stock COCO cannot detect a basket, so drag the region the basket actually occupies in the camera view."}
@@ -142,18 +142,18 @@ export default function BasketRoiPicker({
             setDraft(null);
           }}
           style={{ aspectRatio: String(aspect) }}
-          className={`relative w-full touch-none select-none overflow-hidden rounded border-2 border-dashed ${
+          className={`relative w-full touch-none select-none overflow-hidden rounded-2xl border-2 border-dashed ${
             disabled
-              ? "cursor-not-allowed border-ink-700 opacity-40"
+              ? "cursor-not-allowed border-lavender-300 bg-lavender-100 opacity-60"
               : start
-                ? "cursor-crosshair border-emerald-500"
-                : "cursor-crosshair border-ink-600 hover:border-ink-500"
+                ? "cursor-crosshair border-teal-400 bg-mint-100"
+                : "cursor-crosshair border-lavender-300 bg-lavender-100 hover:border-teal-300"
           }`}
           title={disabled ? "Start the pipeline first" : "Drag to draw the basket zone"}
         >
           {shown && (
             <div
-              className="pointer-events-none absolute rounded-sm border-2 border-yellow-400 bg-yellow-400/10"
+              className="pointer-events-none absolute rounded-xl border-2 border-teal-500 bg-mint-200/30"
               style={{
                 left: `${shown[0] * 100}%`,
                 top: `${shown[1] * 100}%`,
@@ -161,20 +161,20 @@ export default function BasketRoiPicker({
                 height: `${shown[3] * 100}%`,
               }}
             >
-              <span className="absolute -top-0.5 left-1 whitespace-nowrap bg-yellow-400/90 px-1 font-mono text-[9px] font-bold text-black">
+              <span className="absolute -top-0.5 left-2 whitespace-nowrap rounded-full bg-teal-500 px-2 py-px font-mono text-[9px] font-bold text-white">
                 BASKET
               </span>
             </div>
           )}
           {!shown && (
-            <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[11px] text-slate-500">
+            <div className="absolute inset-0 flex items-center justify-center px-4 text-center text-[11px] text-navy-400">
               {disabled ? "Start the pipeline to set a zone" : "Drag here to draw the basket zone"}
             </div>
           )}
         </div>
 
         {box && (
-          <div className="font-mono text-[10px] text-slate-500">
+          <div className="meta">
             px {box.x1},{box.y1} -&gt; {box.x2},{box.y2}
             {frameSize ? ` of ${frameSize[0]}x${frameSize[1]}` : ""}
           </div>
@@ -222,8 +222,8 @@ export default function BasketRoiPicker({
           </button>
         </div>
 
-        {msg && <div className="font-mono text-[10px] text-emerald-400">{msg}</div>}
-        {err && <div className="font-mono text-[10px] text-rose-400">{err}</div>}
+        {msg && <div className="font-mono text-[10px] text-teal-600">{msg}</div>}
+        {err && <div className="font-mono text-[10px] text-rose-300">{err}</div>}
       </div>
     </section>
   );
