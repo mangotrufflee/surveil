@@ -367,8 +367,12 @@ def sessions(limit: int = Query(50, ge=1, le=500)) -> dict[str, Any]:
 @app.get("/api/alerts")
 def alerts() -> dict[str, Any]:
     return {
-        "alerts": ledger.alerts(settings.unaccounted_alert_seconds),
+        "alerts": ledger.alerts(
+            settings.unaccounted_alert_seconds,
+            max_age_seconds=settings.alert_max_age_seconds,
+        ),
         "grace_seconds": settings.unaccounted_alert_seconds,
+        "max_age_seconds": settings.alert_max_age_seconds,
     }
 
 

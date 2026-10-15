@@ -36,7 +36,12 @@ from app.detection import (  # noqa: E402
 )
 from app.geometry import BBox  # noqa: E402
 from app.hands import HandBox  # noqa: E402
-from app.interaction import EventType, InteractionEngine, ProductState  # noqa: E402
+from app.interaction import (  # noqa: E402
+    EventType,
+    InteractionEngine,
+    InteractionEvent,
+    ProductState,
+)
 from app.ledger import Ledger  # noqa: E402
 from app.pipeline import Pipeline  # noqa: E402
 from app.registry import HISTORY_CREDIT, ProductRegistry  # noqa: E402
@@ -738,6 +743,112 @@ def test_pipeline_surfaces_identity_ambiguity(tmp_path: Path):
     assert entry["reason"] == "ambiguous"
     assert entry["runner_up"]
     ledger.close()
+
+
+# ============================================================ alert expiry
+def _seed_lost(ledger: Ledger, product_name: str, track_id: int, age_s: float) -> str:
+    """Record an unresolved TRACK_LOST event `age_s` seconds in the past."""
+    ts = time.time() - age_s
+    event = InteractionEvent(
+        type=EventType.TRACK_LOST,
+        ts=ts,
+        product_id=f"{product_name}#1",
+        product_name=product_name,
+        track_id=track_id,
+        confidence=0.9,
+        bbox=BBox(300, 200, 380, 320),
+        state=ProductState.LOST,
+        session_id="S-reg",
+        meta={"missed": 30},
+    )
+    uid = ledger.record_event(event)
+    ledger.register_products([(event.product_id, product_name, ts)])
+    # backdate so the alert has an age without waiting for the clock
+    with ledger._lock:
+        ledger._conn.execute("UPDATE events SET ts = ? WHERE event_uid = ?", (ts, uid))
+        ledger._conn.commit()
+    return uid
+
+
+def test_alerts_older_than_the_max_age_are_dropped(tmp_path: Path):
+    """An alert nobody acted on within the window stops competing for space."""
+    settings = Settings(auto_start_pipeline=False, db_path=tmp_path / "a.db")
+    settings.thresholds = ThresholdSettings()
+    ledger = Ledger(settings.db_path)
+
+    _seed_lost(ledger, "remote", 6, age_s=30)  # fresh, shown
+    _seed_lost(ledger, "laptop", 5, age_s=360)  # 6 min old, dropped
+
+    everything = ledger.alerts(settings.unaccounted_alert_seconds)
+    assert len(everything) == 2, "nothing is deleted from the ledger"
+
+    visible = ledger.alerts(
+        settings.unaccounted_alert_seconds, max_age_seconds=300.0
+    )
+    names = {a["product_name"] for a in visible}
+    assert names == {"remote"}, f"stale alerts survived: {names}"
+    assert all(a["kind"] == "TRACK_LOST" for a in visible)
+    ledger.close()
+
+
+def test_alerts_without_a_max_age_are_unbounded(tmp_path: Path):
+    """Opting out of the window keeps the previous behaviour."""
+    settings = Settings(auto_start_pipeline=False, db_path=tmp_path / "a.db")
+    ledger = Ledger(settings.db_path)
+    _seed_lost(ledger, "remote", 6, age_s=3600)
+
+    assert len(ledger.alerts(settings.unaccounted_alert_seconds)) == 1
+    assert len(
+        ledger.alerts(settings.unaccounted_alert_seconds, max_age_seconds=None)
+    ) == 1
+    ledger.close()
+
+
+def test_the_alerts_endpoint_passes_the_window_through(tmp_path: Path):
+    """Endpoint-level check, wired to a throwaway ledger.
+
+    Deliberately mirrors the `make_client` pattern in test_api: the API module's
+    globals are replaced before the TestClient is built. Importing `app.api.app`
+    with the module defaults instead would start the *real* pipeline against the
+    real camera and the real data/surveil.db.
+    """
+    from fastapi.testclient import TestClient  # noqa: PLC0415
+
+    from app import api as api_module  # noqa: PLC0415
+
+    settings = Settings(
+        auto_start_pipeline=False,  # never touch a camera or model weights
+        db_path=tmp_path / "a.db",
+        alert_max_age_seconds=300.0,
+    )
+    settings.thresholds = ThresholdSettings()
+    settings.hand_backend = "off"
+    ledger = Ledger(settings.db_path)
+
+    pipeline = Pipeline(settings, ledger, detector=ScriptedDetector([[]]), hand_detector=None)
+    pipeline.begin_session("S-reg")
+
+    prev = (api_module.settings, api_module.pipeline, api_module.ledger)
+    api_module.settings = settings
+    api_module.pipeline = pipeline
+    api_module.ledger = ledger
+    try:
+        _seed_lost(ledger, "remote", 6, age_s=30)
+        _seed_lost(ledger, "laptop", 5, age_s=360)
+        with TestClient(api_module.app) as client:
+            body = client.get("/api/alerts").json()
+    finally:
+        api_module.settings, api_module.pipeline, api_module.ledger = prev
+        pipeline.stop()
+        ledger.close()
+
+    assert body["max_age_seconds"] == 300.0
+    names = {a["product_name"] for a in body["alerts"]}
+    assert names == {"remote"}, f"stale alerts reached the dashboard: {names}"
+
+
+def test_default_max_age_is_five_minutes():
+    assert Settings().alert_max_age_seconds == 300.0
 
 
 if __name__ == "__main__":

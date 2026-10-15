@@ -141,6 +141,10 @@ class Settings(BaseSettings):
     db_path: Path = REPO_ROOT / "data" / "surveil.db"
     auto_start_pipeline: bool = True
     unaccounted_alert_seconds: float = 90.0
+    # How long an unresolved alert stays on the owner's dashboard before it drops
+    # off. Nothing is deleted from the ledger - this is only how long an
+    # unattended alert keeps competing for space with newer ones.
+    alert_max_age_seconds: float = 300.0
 
     thresholds: ThresholdSettings = Field(default_factory=ThresholdSettings)
 

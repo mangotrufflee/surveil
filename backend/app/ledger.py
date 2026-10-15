@@ -447,10 +447,26 @@ AND NOT EXISTS (
             rows = self._conn.execute(sql, params).fetchall()
         return [self._row_to_event(r) for r in rows]
 
-    def alerts(self, grace_seconds: float, session_id: str | None = None) -> list[dict[str, Any]]:
+    def alerts(
+        self,
+        grace_seconds: float,
+        session_id: str | None = None,
+        max_age_seconds: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Unresolved situations for the owner to review.
+
+        `grace_seconds` is how long a product may be unaccounted for before it
+        becomes an alert. `max_age_seconds` is how long an alert stays on the
+        owner's screen before it drops off: an alert nobody acted on within that
+        window is no longer actionable, and letting it sit there just buries the
+        new ones. Nothing is deleted - the events stay in the ledger and come
+        back if the owner filters by time.
+        """
         alerts: list[dict[str, Any]] = []
         for ev in self.unaccounted(grace_seconds, session_id):
             age = time.time() - ev["ts"]
+            if max_age_seconds is not None and age > max_age_seconds:
+                continue
             alerts.append(
                 {
                     "kind": "UNACCOUNTED",
@@ -477,6 +493,8 @@ AND NOT EXISTS (
         for row in lost_rows:
             ev = self._row_to_event(row)
             age = time.time() - ev["ts"]
+            if max_age_seconds is not None and age > max_age_seconds:
+                continue
             alerts.append(
                 {
                     "kind": "TRACK_LOST",
