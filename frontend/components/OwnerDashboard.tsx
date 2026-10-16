@@ -369,35 +369,35 @@ export default function OwnerDashboard() {
           </span>
         </div>
         <div className="grid grid-cols-1 gap-5 p-4 lg:grid-cols-2">
-          <div className="overflow-x-auto">
+          <div className="max-h-52 overflow-y-auto overflow-x-auto rounded-xl border border-lavender-200/80">
             <table className="w-full">
-              <thead>
+              <thead className="sticky top-0 bg-white/95 backdrop-blur z-10">
                 <tr className="border-b border-lavender-200">
-                  <th className="th">product_id (stable)</th>
-                  <th className="th">state</th>
-                  <th className="th">current track</th>
-                  <th className="th">track ids seen</th>
+                  <th className="th !py-1.5">product_id (stable)</th>
+                  <th className="th !py-1.5">state</th>
+                  <th className="th !py-1.5">current track</th>
+                  <th className="th !py-1.5">track ids seen</th>
                 </tr>
               </thead>
               <tbody>
                 {(products?.identities ?? []).map((p) => (
-                  <tr key={p.product_id} className="border-b border-lavender-200/70">
-                    <td className="td">
-                      {p.product_id}
+                  <tr key={p.product_id} className="border-b border-lavender-200/70 hover:bg-lavender-100/50">
+                    <td className="td !py-1.5">
+                      <span className="font-semibold text-navy-800">{p.product_id}</span>
                       {p.reassociations > 0 && (
                         <span
-                          className="ml-1.5 text-[9px] text-teal-600"
+                          className="ml-1.5 text-[9px] text-teal-600 font-semibold"
                           title="This product was re-identified after its track died"
                         >
-                          re-identified x{p.reassociations}
+                          re-id x{p.reassociations}
                         </span>
                       )}
                     </td>
-                    <td className="td">{p.state}</td>
-                    <td className="td text-navy-500">
+                    <td className="td !py-1.5">{p.state}</td>
+                    <td className="td !py-1.5 text-navy-500">
                       {p.current_track_id != null ? `#${p.current_track_id}` : "-"}
                     </td>
-                    <td className="td text-navy-400">
+                    <td className="td !py-1.5 text-navy-400">
                       {p.track_ids.map((t) => `#${t}`).join(" ")}
                     </td>
                   </tr>
@@ -409,30 +409,30 @@ export default function OwnerDashboard() {
             </table>
           </div>
 
-          <div className="overflow-x-auto">
-            <div className="px-4 pb-2 text-[10px] uppercase tracking-wider text-navy-500">
+          <div className="max-h-52 overflow-y-auto overflow-x-auto rounded-xl border border-lavender-200/80">
+            <div className="sticky top-0 bg-white/95 backdrop-blur z-10 px-4 py-1.5 border-b border-lavender-200 text-[10px] font-semibold uppercase tracking-wider text-navy-500">
               Recent re-identifications
             </div>
             <table className="w-full">
-              <thead>
+              <thead className="sticky top-7 bg-white/95 backdrop-blur z-10">
                 <tr className="border-b border-lavender-200">
-                  <th className="th">product</th>
-                  <th className="th">track</th>
-                  <th className="th">history</th>
-                  <th className="th">spatial</th>
-                  <th className="th">look</th>
+                  <th className="th !py-1.5">product</th>
+                  <th className="th !py-1.5">track</th>
+                  <th className="th !py-1.5">history</th>
+                  <th className="th !py-1.5">spatial</th>
+                  <th className="th !py-1.5">look</th>
                 </tr>
               </thead>
               <tbody>
                 {(products?.reassociations ?? []).map((r, i) => (
-                  <tr key={`${r.ts}-${i}`} className="border-b border-lavender-200/70">
-                    <td className="td">{r.product_id}</td>
-                    <td className="td text-navy-500">
+                  <tr key={`${r.ts}-${i}`} className="border-b border-lavender-200/70 hover:bg-lavender-100/50">
+                    <td className="td !py-1.5 font-semibold text-navy-800">{r.product_id}</td>
+                    <td className="td !py-1.5 text-navy-500">
                       #{r.from_track} &rarr; #{r.to_track}
                     </td>
-                    <td className="td">{r.history ?? "-"}</td>
-                    <td className="td">{r.spatial ?? "-"}</td>
-                    <td className="td">{r.appearance ?? "-"}</td>
+                    <td className="td !py-1.5">{r.history ?? "-"}</td>
+                    <td className="td !py-1.5">{r.spatial ?? "-"}</td>
+                    <td className="td !py-1.5">{r.appearance ?? "-"}</td>
                   </tr>
                 ))}
                 {!products?.reassociations.length && (
