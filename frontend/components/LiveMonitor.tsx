@@ -507,18 +507,47 @@ export default function LiveMonitor() {
                 t === "IN_HAND" ||
                 t === "RETURNING" ||
                 t === "IN_BASKET";
+
+              const basketThresholdRatio = snap?.thresholds.basket_overlap_ratio ?? 0.5;
+              const basketConfirmFrames = snap?.thresholds.basket_confirm_frames ?? 4;
+              const basketThresholdMet = s.basket_overlap >= basketThresholdRatio;
+
               const progress =
                 t === "LIFTING"
-                  ? { have: s.lift_frames, need: snap?.thresholds.lift_confirm_frames ?? 5 }
+                  ? {
+                      have: s.lift_frames,
+                      need: snap?.thresholds.lift_confirm_frames ?? 5,
+                      color: "bg-amber-500",
+                      label: `${s.lift_frames}/${snap?.thresholds.lift_confirm_frames ?? 5} frames to lift`,
+                    }
                   : t === "RETURNING"
-                    ? { have: s.return_frames, need: snap?.thresholds.return_confirm_frames ?? 5 }
-                    : t === "IN_BASKET"
-                      ? { have: s.basket_frames, need: snap?.thresholds.basket_confirm_frames ?? 4 }
+                    ? {
+                        have: s.return_frames,
+                        need: snap?.thresholds.return_confirm_frames ?? 5,
+                        color: "bg-blue-500",
+                        label: `${s.return_frames}/${snap?.thresholds.return_confirm_frames ?? 5} frames to return`,
+                      }
+                    : (t === "IN_HAND" && (s.basket_frames > 0 || basketThresholdMet)) ||
+                        t === "IN_BASKET"
+                      ? {
+                          have: t === "IN_BASKET" ? basketConfirmFrames : s.basket_frames,
+                          need: basketConfirmFrames,
+                          color: "bg-[#7C74C9]",
+                          label:
+                            t === "IN_BASKET"
+                              ? `Confirmed PLACED_IN_BASKET (≥50% for ${basketConfirmFrames} frames)`
+                              : `${s.basket_frames}/${basketConfirmFrames} frames (≥50% in basket) → PLACED_IN_BASKET`,
+                        }
                       : null;
+
               return (
                 <div
                   key={s.track_id}
-                  className="rounded-2xl border border-lavender-200 bg-lavender-100/70 p-3"
+                  className={`rounded-2xl border p-3 transition ${
+                    t === "IN_BASKET"
+                      ? "border-[#7C74C9]/40 bg-[#F5F3FD]"
+                      : "border-lavender-200 bg-lavender-100/70"
+                  }`}
                 >
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex min-w-0 items-center gap-2">
@@ -551,8 +580,21 @@ export default function LiveMonitor() {
                       {s.displacement_px.toFixed(0)}px / {snap?.thresholds.shelf_displacement_px ?? 60}px
                     </span>
                     {s.basket_overlap > 0 && (
-                      <span className="chip border-[#E0DDF6] bg-[#F1EFFC] text-[#5F58AE]">
+                      <span
+                        className={`chip ${
+                          basketThresholdMet
+                            ? "border-[#7C74C9] bg-[#EDEAF9] text-[#5F58AE] font-semibold ring-1 ring-[#7C74C9]/40"
+                            : "border-[#E0DDF6] bg-[#F1EFFC] text-[#5F58AE]"
+                        }`}
+                        title="Condition: >= 50% of the box inside basket for 4 frames -> PLACED_IN_BASKET"
+                      >
+                        <span
+                          className={`mr-1 inline-block h-1.5 w-1.5 rounded-full ${
+                            basketThresholdMet ? "bg-[#7C74C9] animate-pulse" : "bg-[#7C74C9]/50"
+                          }`}
+                        />
                         basket {(s.basket_overlap * 100).toFixed(0)}%
+                        {basketThresholdMet ? " (≥50% met)" : " (<50%)"}
                       </span>
                     )}
                     <span className="chip border-lavender-300 bg-white text-navy-500">
@@ -560,19 +602,32 @@ export default function LiveMonitor() {
                     </span>
                   </div>
 
+                  {/* Confirmation Progress for PLACED_IN_BASKET / LIFTING / RETURNING */}
                   {progress && (
                     <div className="mt-2.5">
                       <div className="h-1.5 overflow-hidden rounded-full bg-lavender-200">
                         <div
-                          className="h-full rounded-full bg-teal-500 transition-all"
+                          className={`h-full rounded-full transition-all duration-300 ${
+                            progress.color || "bg-teal-500"
+                          }`}
                           style={{
                             width: `${Math.min(100, (progress.have / Math.max(1, progress.need)) * 100)}%`,
                           }}
                         />
                       </div>
-                      <div className="mt-1.5 font-mono text-[9px] text-navy-400">
-                        {progress.have}/{progress.need} frames to confirm
+                      <div className="mt-1.5 flex items-center justify-between font-mono text-[9px] text-navy-500">
+                        <span>{progress.label}</span>
+                        <span>
+                          {progress.have}/{progress.need}
+                        </span>
                       </div>
+                    </div>
+                  )}
+
+                  {t === "IN_BASKET" && (
+                    <div className="mt-2 flex items-center gap-1.5 rounded-lg border border-[#7C74C9]/30 bg-[#EDEAF9]/70 px-2 py-0.5 text-[9px] font-mono text-[#5F58AE]">
+                      <span className="h-1.5 w-1.5 rounded-full bg-[#7C74C9]" />
+                      <span>PLACED_IN_BASKET (≥ 50% overlap for 4 frames confirmed)</span>
                     </div>
                   )}
                 </div>
